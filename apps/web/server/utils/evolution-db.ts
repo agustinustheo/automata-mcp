@@ -859,31 +859,11 @@ export async function listChatActivity(
 
 /**
  * `per_jid` from a loose index scan over the per-chat timestamp index — see
- * `listChatActivity`. Two CTEs, `jids` (recursive) then `per_jid`.
- *
- * The jid walk asks the index for the smallest `remoteJid` above the last one,
- * one descent per chat; `IS NOT NULL` on the first step and `>` on the rest keep
- * NULL out. Postgres 17 has no skip scan of its own, hence the recursion.
+ * `listChatActivity`. Two CTEs, `jids` (`distinctJids`) then `per_jid`.
  */
 function perJidBySkipScan(sql: Sql, instanceId: string) {
   return sql`
-    jids AS (
-      (SELECT m.key->>'remoteJid' AS jid
-       FROM "Message" m
-       WHERE m."instanceId" = ${instanceId}
-         AND m.key->>'remoteJid' IS NOT NULL
-       ORDER BY m.key->>'remoteJid'
-       LIMIT 1)
-      UNION ALL
-      SELECT (SELECT m.key->>'remoteJid'
-              FROM "Message" m
-              WHERE m."instanceId" = ${instanceId}
-                AND m.key->>'remoteJid' > j.jid
-              ORDER BY m.key->>'remoteJid'
-              LIMIT 1)
-      FROM jids j
-      WHERE j.jid IS NOT NULL
-    ), per_jid AS (
+    ${distinctJids(sql, instanceId)}, per_jid AS (
       SELECT j.jid,
              last.ts AS last_ts,
              lpad(last.ts::text, 10, '0') || '|' || last.mid || '|' || last.row_id AS last_key
@@ -905,6 +885,35 @@ function perJidBySkipScan(sql: Sql, instanceId: string) {
       ) last ON true
       WHERE j.jid IS NOT NULL
         AND j.jid <> 'status@broadcast'
+    )
+  `
+}
+
+/**
+ * `jids`: every distinct `remoteJid` of the account, one index descent each,
+ * over any index leading `("instanceId", (key->>'remoteJid'))`. Recursive — the
+ * caller writes `WITH RECURSIVE`. `IS NOT NULL` on the first step and `>` on the
+ * rest keep NULL out; the last row is NULL, so filter `jid` downstream. Postgres
+ * 17 has no skip scan of its own, hence the recursion.
+ */
+function distinctJids(sql: Sql, instanceId: string) {
+  return sql`
+    jids AS (
+      (SELECT m.key->>'remoteJid' AS jid
+       FROM "Message" m
+       WHERE m."instanceId" = ${instanceId}
+         AND m.key->>'remoteJid' IS NOT NULL
+       ORDER BY m.key->>'remoteJid'
+       LIMIT 1)
+      UNION ALL
+      SELECT (SELECT m.key->>'remoteJid'
+              FROM "Message" m
+              WHERE m."instanceId" = ${instanceId}
+                AND m.key->>'remoteJid' > j.jid
+              ORDER BY m.key->>'remoteJid'
+              LIMIT 1)
+      FROM jids j
+      WHERE j.jid IS NOT NULL
     )
   `
 }
@@ -944,17 +953,43 @@ function perJidByAggregate(sql: Sql, instanceId: string) {
  * `DESC` on the last column matches too (the prefix is the same; a backward
  * scan reads either).
  *
- * Evolution creates no such index; docs/whatsapp.md tells the operator to. So
- * this is per database (`evo:default` or the connection's own), cached ten
- * minutes — an index built while running is picked up without a restart — and
- * a failed check reads as "absent" for a minute, which falls back to the shape
- * that works everywhere rather than gambling on one that needs the index.
- * Absence is logged once per database per process.
+ * Evolution creates no such index; docs/whatsapp.md tells the operator to.
  */
 async function chatTimestampIndexPresent(instance: AppInstance, query: SharedPool['query']): Promise<boolean> {
+  return await messageIndexPresent(instance, query, CHAT_TS_INDEX)
+}
+
+/** What a `"Message"` index must look like for a read to rely on it, and what to log when it is missing. */
+interface MessageIndexSpec {
+  /** `pg_get_indexdef` output, as a `LIKE` pattern. No `_` or `%` inside except as wildcards. */
+  shape: string
+  /** Whether the index carries a `WHERE`. A partial one serves only queries whose predicate implies it. */
+  partial: boolean
+  /** Log prefix, and what the read does instead while the index is missing. */
+  label: string
+  fallback: string
+  missing: string
+  cache: ReturnType<typeof staleWhileFailing<boolean>>
+  reported: Set<string>
+}
+
+/**
+ * Whether this message database has an index of `spec`'s shape: valid, ready,
+ * matched on `pg_get_indexdef` so an operator's own name for it counts. Per
+ * database (`evo:default` or the connection's own), cached ten minutes — an
+ * index built while running is picked up without a restart — and a failed
+ * check reads as "absent" for a minute, which falls back to the read that works
+ * everywhere rather than gambling on one that needs the index. Absence is
+ * logged once per database per process.
+ */
+async function messageIndexPresent(
+  instance: AppInstance,
+  query: SharedPool['query'],
+  spec: MessageIndexSpec,
+): Promise<boolean> {
   const key = messagePoolKey(instance)
 
-  return await chatIndexCache(key, async () => {
+  return await spec.cache(key, async () => {
     let present: boolean
     try {
       const [row] = await query(sql => sql<Array<{ present: boolean }>>`
@@ -964,35 +999,38 @@ async function chatTimestampIndexPresent(instance: AppInstance, query: SharedPoo
           WHERE i.indrelid = to_regclass('"Message"')
             AND i.indisvalid
             AND i.indisready
-            AND i.indpred IS NULL
-            AND pg_get_indexdef(i.indexrelid) LIKE ${CHAT_TS_INDEX_SHAPE}
+            AND (i.indpred IS NOT NULL) = ${spec.partial}
+            AND pg_get_indexdef(i.indexrelid) LIKE ${spec.shape}
         ) AS present
       `)
       present = row?.present === true
     }
     catch (error) {
-      console.warn('[chats] could not check "Message" for the chat listing index; listing by full scan for now:', error)
+      console.warn(`${spec.label} could not check "Message" for its index; ${spec.fallback} for now:`, error)
       return undefined
     }
 
-    if (!present && !chatIndexMissingReported.has(key)) {
-      chatIndexMissingReported.add(key)
-      console.warn(
-        '[chats] "Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
-        + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
-        + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
-      )
+    if (!present && !spec.reported.has(key)) {
+      spec.reported.add(key)
+      console.warn(`${spec.label} ${spec.missing}`)
     }
-    if (present) chatIndexMissingReported.delete(key)
+    if (present) spec.reported.delete(key)
     return present
   })
 }
 
-/** What `pg_get_indexdef` prints for that index, up to the last column. No `_` or `%` inside. */
-const CHAT_TS_INDEX_SHAPE = '%USING btree ("instanceId", ((key ->> \'remoteJid\'::text)), "messageTimestamp"%'
-
-const chatIndexCache = staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false })
-const chatIndexMissingReported = new Set<string>()
+const CHAT_TS_INDEX: MessageIndexSpec = {
+  // Up to the last column, so `DESC` and extra trailing columns count too.
+  shape: '%USING btree ("instanceId", ((key ->> \'remoteJid\'::text)), "messageTimestamp"%',
+  partial: false,
+  label: '[chats]',
+  fallback: 'listing by full scan',
+  missing: '"Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
+    + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
+    + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
+  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
+  reported: new Set<string>(),
+}
 
 /**
  * One `(remoteJid, remoteJidAlt)` combination seen on a LID chat's rows.
@@ -1022,13 +1060,52 @@ export interface LidLinkRow {
  * a chat-scoped token's view depend on chats outside its scope — the same reason
  * a phone-number chat's rows are not read for the reverse link.
  *
- * One scan of the account (`instanceId` is the only index), grouped down to
- * distinct combinations, so the result is small — a few rows per person, never
- * per message. Cached by the caller; never on a per-message path.
+ * Small result — a few rows per person, never per message — cached by the
+ * caller, never on a per-message path. **What it costs depends on two indexes
+ * (#222):**
+ *
+ * - **With both** the per-chat timestamp index (`chatTimestampIndexPresent`) and
+ *   `message_lid_alt_idx` (`LID_ALT_INDEX`): proportional to chats plus rows
+ *   carrying an alt, not to messages. The LID chats come from the same loose
+ *   index scan as `listChatActivity` (one descent per distinct `remoteJid`); the
+ *   pairs from the partial index, which holds only rows with `remoteJidAlt` —
+ *   2,131 of 1.96M on the largest production account, every one in a LID chat.
+ *   Each LID chat is returned once with `alt` null, plus once per distinct alt.
+ * - **Otherwise** the old aggregate over every LID chat row: 25 s cold on that
+ *   account (208k LID rows), past the 10 s timeout, so its links never loaded.
+ *
+ * The two answer differently only in `alt`-null rows: the aggregate emits one
+ * where some row of the chat lacks an alt, the index shape for every LID chat.
+ * `shapeLinks` reads a null row only as "this LID chat exists", so the links it
+ * builds are the same. Verified with `EXCEPT` both ways on the non-null pairs and
+ * on the set of LID chats.
+ *
+ * **Keep `key ? 'remoteJidAlt'` a literal, word for word the index's
+ * predicate** — as a bind parameter or reworded, the planner can no longer prove
+ * the partial index applies, and the read scans the account again.
  */
 export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]> {
   const { query } = await evolutionDbFor(instance)
-  const instanceId = await resolveEvolutionInstanceId(instance)
+  const [instanceId, skipScan, altIndex] = await Promise.all([
+    resolveEvolutionInstanceId(instance),
+    chatTimestampIndexPresent(instance, query),
+    messageIndexPresent(instance, query, LID_ALT_INDEX),
+  ])
+
+  if (skipScan && altIndex) {
+    return await query(sql => sql<LidLinkRow[]>`
+      WITH RECURSIVE ${distinctJids(sql, instanceId)}
+      SELECT j.jid, NULL::text AS alt
+      FROM jids j
+      WHERE j.jid LIKE '%@lid'
+      UNION
+      SELECT m.key->>'remoteJid', m.key->>'remoteJidAlt'
+      FROM "Message" m
+      WHERE m."instanceId" = ${instanceId}
+        AND m.key ? 'remoteJidAlt'
+        AND m.key->>'remoteJid' LIKE '%@lid'
+    `)
+  }
 
   return await query(sql => sql<LidLinkRow[]>`
     SELECT m.key->>'remoteJid' AS jid, m.key->>'remoteJidAlt' AS alt
@@ -1037,6 +1114,23 @@ export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]>
       AND m.key->>'remoteJid' LIKE '%@lid'
     GROUP BY 1, 2
   `)
+}
+
+/**
+ * The partial index `readLidLinks` reads pairs from. Only rows carrying
+ * `remoteJidAlt` — live traffic in LID chats — so it stays tiny. docs/whatsapp.md
+ * has the statement.
+ */
+const LID_ALT_INDEX: MessageIndexSpec = {
+  shape: '%USING btree ("instanceId"%) WHERE (key ? \'remoteJidAlt\'::text)',
+  partial: true,
+  label: '[identity]',
+  fallback: 'reading LID links by full scan',
+  missing: '"Message" has no partial index WHERE key ? \'remoteJidAlt\', '
+    + 'so reading LID links scans every message in an account\'s LID chats and large accounts time out. '
+    + 'Create message_lid_alt_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
+  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
+  reported: new Set<string>(),
 }
 
 /**

@@ -157,6 +157,28 @@ or a sequential scan, `read-messages` gains nothing from it on that account, but
 keep it anyway: the chat listing still needs it. Like the indexes below, it
 lives on Evolution's table and must be re-checked after an image-tag bump.
 
+**Index the messages that link a LID to a phone number.** The app reads which
+LID chats belong to which phone numbers ([Chats addressed by
+LID](#chats-addressed-by-lid-lid)) from the few live messages that carry
+`remoteJidAlt`. Without this index that read opens every message in the
+account's LID chats; on an account with 1.9M messages it took 25 s and never
+finished inside the timeout, so its LID chats showed no phone number and were
+never merged. With it, and with the per-chat index above, the read walks the
+account's chats and the handful of rows this index holds (about 2,000 of 1.9M
+there):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_lid_alt_idx
+  ON "Message" ("instanceId")
+  WHERE key ? 'remoteJidAlt';
+```
+
+The `WHERE` clause has to match the app's query word for word, or Postgres
+won't use the index; any btree index leading with `"instanceId"` under that
+exact clause counts, whatever its name. The app looks for it every ten minutes,
+uses the old read until it finds it, and logs once that it is missing. It needs
+the per-chat index above too; without that one the old read stays.
+
 **Index message text for search.** Without this index, `search-messages` and
 the dashboard's message filter read every message of the account on every
 search, and open each message's stored payload to find its text. On an account
@@ -297,9 +319,10 @@ table recreated by an Evolution upgrade since. Check with
 should then stay close to 1.
 
 The trigram index and these storage parameters live on Evolution's tables, as
-`message_instance_ts_idx`, `message_instance_chat_ts_idx` and
-`message_body_trgm` do. They survive restarts, but a Prisma migration that
-recreates either table drops them without any warning. Re-check all five after
+`message_instance_ts_idx`, `message_instance_chat_ts_idx`,
+`message_lid_alt_idx` and `message_body_trgm` do. They survive restarts, but a
+Prisma migration that recreates either table drops them without any warning.
+Re-check all six after
 bumping Evolution's image tag. Both trigram indexes use `pg_trgm`'s operator
 class, so dropping the schema it lives in with `CASCADE` drops both.
 
