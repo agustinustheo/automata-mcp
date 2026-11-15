@@ -59,6 +59,10 @@ const webhookBody = z.object({
     .default({}),
 })
 
+const backfillBody = z.object({
+  chatId: z.string().regex(/^-?\d{1,20}$/, 'a chat id as a string of digits'),
+})
+
 const resolveBody = z.object({ query: z.string().trim().min(1).max(256) })
 
 const sendBody = z.object({
@@ -138,6 +142,12 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
         status: 200,
         body: await manager.chats(id, clampInt(query.get('take'), 100, 1, 500), clampInt(query.get('skip'), 0, 0, 1_000_000)),
       }),
+    },
+    {
+      // Asks for more of one chat's older history. Stored and paced by backfill;
+      // no Telegram request here, but nothing would fetch it without credentials.
+      label: 'POST /sessions/:id/backfill', method: 'POST', pattern: /^\/sessions\/([^/]+)\/backfill$/, access: 'session', needsTelegram: true,
+      handle: async ({ id, body }) => ({ status: 202, body: await manager.extendBackfill(id, parse(backfillBody, body).chatId) }),
     },
     {
       label: 'POST /sessions/:id/resolve', method: 'POST', pattern: /^\/sessions\/([^/]+)\/resolve$/, access: 'session', needsTelegram: true,

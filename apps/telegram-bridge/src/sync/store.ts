@@ -69,6 +69,8 @@ export interface BackfillChat {
   access_hash: string | null
   backfill_cursor: string | null
   backfill_count: number
+  /** Raised by `extendBackfill`; null = the deployment's per-chat setting. */
+  backfill_limit: number | null
 }
 
 export interface KnownChat {
@@ -434,7 +436,7 @@ export class SyncStore {
 
   async nextBackfillChat(): Promise<BackfillChat | undefined> {
     const [row] = await this.sql<BackfillChat[]>`
-      SELECT chat_id, type, access_hash, backfill_cursor, backfill_count FROM chats
+      SELECT chat_id, type, access_hash, backfill_cursor, backfill_count, backfill_limit FROM chats
       WHERE session_id = ${this.sessionId} AND backfill_stopped IS NULL
       ORDER BY last_message_at DESC NULLS LAST, chat_id DESC
       LIMIT 1`
@@ -460,6 +462,38 @@ export class SyncStore {
 
   async stopBackfill(chatId: string, reason: BackfillStop): Promise<void> {
     await this.recordBackfill(chatId, { cursor: null, added: 0, oldest: null, stopped: reason })
+  }
+
+  /**
+   * Let a chat whose backfill stopped at its message count fetch `more` older
+   * messages, from where it stopped (the cursor is kept).
+   *
+   * Only a chat stopped by `count`: one still fetching has nothing to extend,
+   * and `days`, `start`, `skipped` and `inaccessible` are not lifted by fetching
+   * more — the day limit in particular is the plan's, and stays. Conditional on
+   * the stop in the same statement, so two requests racing extend once. Answers
+   * the chat's state either way; `extended` says whether this call did it.
+   */
+  async extendBackfill(chatId: string, more: number): Promise<{
+    extended: boolean
+    stopped: BackfillStop | null
+    count: number
+    limit: number | null
+  } | undefined> {
+    return await this.write(async () => {
+      const [updated] = await this.sql<{ backfill_stopped: BackfillStop | null, backfill_count: number, backfill_limit: number | null }[]>`
+        UPDATE chats SET backfill_limit = backfill_count + ${more}, backfill_stopped = NULL,
+          backfill_complete = false, updated_at = now()
+        WHERE session_id = ${this.sessionId} AND chat_id = ${chatId} AND backfill_stopped = 'count'
+        RETURNING backfill_stopped, backfill_count, backfill_limit`
+      if (updated) {
+        return { extended: true, stopped: updated.backfill_stopped, count: updated.backfill_count, limit: updated.backfill_limit }
+      }
+      const [row] = await this.sql<{ backfill_stopped: BackfillStop | null, backfill_count: number, backfill_limit: number | null }[]>`
+        SELECT backfill_stopped, backfill_count, backfill_limit FROM chats
+        WHERE session_id = ${this.sessionId} AND chat_id = ${chatId}`
+      return row && { extended: false, stopped: row.backfill_stopped, count: row.backfill_count, limit: row.backfill_limit }
+    })
   }
 
   /** Every channel that can be caught up, most recently active first. */

@@ -6,7 +6,7 @@ import type { Sql } from './db.ts'
 import { HttpError, describeError, telegramNotConfigured } from './http-error.ts'
 import { SessionLocks } from './locks.ts'
 import { chatRow, entityId, inputPeerFor, markedId, usersOf } from './sync/convert.ts'
-import { type ChatListing, SyncStore } from './sync/store.ts'
+import { type BackfillStop, type ChatListing, SyncStore } from './sync/store.ts'
 import { type BackfillOptions, SessionSync, type SyncStatus, heapMb } from './sync/syncer.ts'
 import { deliverWebhook } from './webhook.ts'
 
@@ -588,6 +588,29 @@ export class SessionManager {
       username: row?.username ?? known?.username ?? null,
       known: known !== undefined,
     }
+  }
+
+  /**
+   * Fetch up to another `TELEGRAM_BACKFILL_MAX_PER_CHAT` older messages for one
+   * chat whose history stopped at that count. Stored, then picked up by the
+   * session's backfill in its usual order and at its usual pace — no Telegram
+   * request is made here, so it works while disconnected and resumes on connect.
+   *
+   * The day limit is untouched: a chat that reaches it stops there (`days`)
+   * however much more it was given. Refusals carry a `code` the app branches on:
+   * `chat_unknown`, `backfill_not_stopped` (still fetching, or stopped for a
+   * reason more messages cannot lift — `stopped` says which).
+   */
+  async extendBackfill(id: string, chatId: string): Promise<{ chatId: string, count: number, limit: number }> {
+    await this.row(id)
+    const more = this.config.backfill.maxPerChat
+    const result = await new SyncStore(this.sql, id).extendBackfill(chatId, more)
+    if (!result) throw new HttpError(404, 'This chat is not synced for this account.', 'chat_unknown')
+    if (!result.extended) {
+      throw new HttpError(409, extendRefusal(result.stopped), 'backfill_not_stopped')
+    }
+    this.runtimes.get(id)?.sync?.wakeBackfill()
+    return { chatId, count: result.count, limit: result.limit ?? result.count + more }
   }
 
   /**
@@ -1250,5 +1273,17 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   }
   finally {
     clearTimeout(timer)
+  }
+}
+
+/** Why a chat's history cannot be extended, for the caller to show. */
+function extendRefusal(stopped: BackfillStop | null): string {
+  switch (stopped) {
+    case null: return 'Older history for this chat is still being fetched.'
+    case 'start': return 'All of this chat\'s history is already synced.'
+    case 'days': return 'This chat\'s history already reaches back as far as this account syncs.'
+    case 'skipped': return 'Older history is not fetched for broadcast channels.'
+    case 'inaccessible': return 'Telegram does not allow this account to read this chat\'s older history.'
+    case 'count': return 'Older history for this chat is already being fetched.'
   }
 }

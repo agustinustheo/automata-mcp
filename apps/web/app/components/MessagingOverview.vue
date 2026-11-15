@@ -28,6 +28,8 @@ const props = defineProps<{
    * `DbUrlNotice` explains at length.
    */
   canReadMessages: boolean
+  /** Telegram only: passed to the chats table. See `ChatsDialog`'s prop. */
+  moreHistory?: 'load' | 'upgrade' | 'view'
 }>()
 
 /** Stands in for a profile picture, which only WhatsApp provides. */
@@ -115,6 +117,7 @@ const contactsOpen = ref(false)
     :instance-id="id"
     :kind="kind"
     :total="stats?.chats"
+    :more-history="moreHistory"
   />
 
   <MessagesDialog

@@ -2,7 +2,7 @@
 import { useIntervalFn } from '@vueuse/core'
 import { SendIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import { TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
+import { TELEGRAM_HISTORY_MESSAGES_PER_CHAT, TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 
 /**
  * The link-and-dashboard panel for a Telegram connection. Chosen by
@@ -67,6 +67,16 @@ const pairingError = ref('')
 const password = ref('')
 
 type Mode = 'connected' | 'pairing' | 'lost' | 'unreachable' | 'unlinked'
+
+/**
+ * What a chat stopped at the per-chat message limit offers in the chats table:
+ * a manager loads more where the plan allows it, sees Upgrade where it does
+ * not; anyone else sees the fact. The server decides again on the request.
+ */
+const moreHistory = computed<'load' | 'upgrade' | 'view'>(() => {
+  if (!props.canManage) return 'view'
+  return data.value?.historyLimitedByPlan ? 'upgrade' : 'load'
+})
 
 /**
  * **Only a manager enters pairing mode**, for the reason InstanceWhatsapp gives:
@@ -368,6 +378,7 @@ const count = new Intl.NumberFormat()
         :profile="{ name: data?.profileName || 'Telegram', detail: profileDetail }"
         :stats="data?.stats"
         :can-read-messages="data?.instance.canReadMessages !== false"
+        :more-history="moreHistory"
       />
 
       <p class="text-xs text-muted-foreground">
@@ -385,7 +396,9 @@ const count = new Intl.NumberFormat()
              plan, which changes nothing until the account is linked again. -->
         <template v-if="data?.sync?.historyDays !== undefined">
           Older history reaches back {{ count.format(data.sync.historyDays) }}
-          {{ data.sync.historyDays === 1 ? 'day' : 'days' }}.
+          {{ data.sync.historyDays === 1 ? 'day' : 'days' }}, up to
+          {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages per chat<template v-if="moreHistory === 'load'">;
+            open Chats to load more for one chat</template>.
         </template>
       </p>
     </template>
