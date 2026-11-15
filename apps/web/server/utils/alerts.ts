@@ -622,7 +622,7 @@ function outageMail(instance: AppInstance, health: ConnectionHealth, canManage: 
     }
   }
 
-  const cause = health.kind === 'telegram' ? telegramOutageCause(health, canManage) : whatsappOutageCause(health, canManage)
+  const cause = health.kind === 'telegram' ? telegramOutageCause(health, canManage) : whatsappOutageCause(instance, health, canManage)
 
   return {
     subject: `${label} is disconnected`,
@@ -681,7 +681,27 @@ function evolutionStuckCause(instance: AppInstance, canManage: boolean, diagnosi
     : `${diagnosis} Nothing needs scanning; ${service}, and an admin of your organization has been told as well.`
 }
 
-function whatsappOutageCause(health: ConnectionHealth, canManage: boolean): string {
+/**
+ * A dropped session in `connecting` is Evolution retrying by itself — the fork
+ * (ju-li/evolution-api-v2) every few minutes until it lands, stock 2.3.7 on a
+ * socket that hung while connecting. Reconnect answers 409 there
+ * (`reconnectInstance`) and the dashboard offers no button, so the mail must
+ * not send anyone to press one: it says Evolution is on it, and who restarts
+ * the service if it stays down.
+ */
+function whatsappOutageCause(instance: AppInstance, health: ConnectionHealth, canManage: boolean): string {
+  if (health.sessionLost && health.state === 'connecting') {
+    const service = onDeploymentServer(instance)
+      ? 'whoever runs this deployment can restart its Evolution service'
+      : 'the Evolution server this connection uses can be restarted'
+    return canManage
+      ? 'The session dropped. The phone is still linked and Evolution is retrying the connection '
+        + 'by itself, so no QR scan is needed — it comes back once WhatsApp can be reached. If it '
+        + `stays down, ${service}.`
+      : 'The session dropped. The phone is still linked and Evolution is retrying the connection '
+        + 'by itself — no QR scan needed. If it stays down, an admin of your organization can see '
+        + 'to it.'
+  }
   return health.sessionLost
     ? canManage
       ? 'The session dropped. The phone is still linked, so reconnecting should be '

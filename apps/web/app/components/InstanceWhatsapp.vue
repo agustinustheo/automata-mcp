@@ -579,10 +579,13 @@ const importHistory = () => backToPairing(
             may be stuck — restarting {{ evolutionServer }} usually reconnects it
             without a new scan.
           </template>
+          <!-- Evolution retries by itself here — on an Evolution that records
+               retried closes, every few minutes until WhatsApp answers — and
+               Reconnect is refused in `connecting`, so no button. -->
           <template v-else-if="state === 'connecting'">
-            Evolution is still trying to connect this account. If it does not settle
-            within a minute or two, restarting {{ evolutionServer }} reconnects it
-            without a new scan.
+            Evolution is retrying the connection by itself and brings it back
+            without a new scan once WhatsApp can be reached. If it stays down,
+            restarting {{ evolutionServer }} reconnects it without a new scan.
           </template>
           <template v-else>
             Evolution has no live connection for this account. Restarting

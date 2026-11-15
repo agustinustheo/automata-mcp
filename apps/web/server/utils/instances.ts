@@ -651,7 +651,9 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
  * `sessionLost` is the disagreement between the two, and it is what tells a
  * dropped session from an account with no session at all. A fresh instance and
  * a logout both leave the column `close`, and a QR on screen leaves it
- * `connecting`; only a retried close leaves it `open` with nothing live behind it.
+ * `connecting`; on stock 2.3.7 only a retried close leaves it `open` with
+ * nothing live behind it. The fork (ju-li/evolution-api-v2) writes `connecting`
+ * for a retried close instead, and records why — `isSessionLost` reads both.
  *
  * **Where the row and the counts come from — and why not `fetchInstances`.**
  * That route answers with Prisma's `_count`, which counts every account's rows
@@ -908,7 +910,7 @@ export interface RowChurn {
  */
 export function rowChurn(
   stored: RowChurn,
-  read: { columnOpen: boolean, rowWrittenAt?: string },
+  read: ChurnRead,
   now = Date.now(),
 ): { churn: RowChurn, flapping: boolean } {
   const churn = nextChurn(stored, read, now)
@@ -922,11 +924,43 @@ export function isFlapping(churn: RowChurn, now = Date.now()): boolean {
   return seenAt - since >= CHURN_CONFIRM_MS && now - seenAt < CHURN_CONFIRM_MS
 }
 
-function nextChurn(stored: RowChurn, read: { columnOpen: boolean, rowWrittenAt?: string }, now: number): RowChurn {
-  const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
-  if (Number.isNaN(writtenAt)) return stored
+/**
+ * What one status read tells `rowChurn`. `retryableClose` is the fork's record
+ * of a close it is retrying (`recordedRetryableClose`); stock 2.3.7 never
+ * supplies one.
+ */
+export interface ChurnRead {
+  columnOpen: boolean
+  rowWrittenAt?: string
+  retryableClose?: number
+}
 
-  if (!read.columnOpen || now - writtenAt >= ROW_RECENT_MS) return {}
+/**
+ * **On the fork the row is mostly `connecting` during a loop.** It writes
+ * `connecting` on every retried close and backs off up to 5 min, with the
+ * attempt count reset only after a minute of stable `open` — so a 440 loop
+ * slows to one brief `open` every 5 min, and a read rarely lands on it. Two
+ * rules keep `flapping` meaning the same on both images:
+ *
+ *   - a recorded `CONNECTION_REPLACED` (440) counts as a socket just opened:
+ *     a socket was open and another on the same credentials replaced it, and
+ *     the fork is about to try again. One replacement that recovers writes
+ *     `open` within seconds and stops counting like any reopen; 440 rows seen
+ *     for `CHURN_CONFIRM_MS` are a loop.
+ *   - any other recorded retryable close leaves the observation as it was: an
+ *     attempt in a loop can fail some other way (428, 408) between two
+ *     replacements, and must not end the episode; a plain dropped session
+ *     (egress blocked) never opens anything, so it never starts one, and a
+ *     stale observation lapses on its own.
+ */
+function nextChurn(stored: RowChurn, read: ChurnRead, now: number): RowChurn {
+  if (read.retryableClose !== undefined && read.retryableClose !== CONNECTION_REPLACED) return stored
+
+  if (read.retryableClose === undefined) {
+    const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
+    if (Number.isNaN(writtenAt)) return stored
+    if (!read.columnOpen || now - writtenAt >= ROW_RECENT_MS) return {}
+  }
 
   const lastSeen = stored.seenAt ? Date.parse(stored.seenAt) : Number.NaN
   const continuing = stored.since !== undefined && now - lastSeen < CHURN_CONFIRM_MS
@@ -965,7 +999,11 @@ const STALL_CLOCK_SKEW_MS = 30_000
  *     Evolution opened a socket since — a restart, a Reconnect, its own retry —
  *     so the evidence is about a socket that no longer exists: spent. 2.3.7
  *     writes the `"Instance"` row on every open (see `rowChurn`), and a stuck
- *     session writes nothing, which is what makes this the test.
+ *     session writes nothing, which is what makes this the test. The fork's
+ *     extra writes (`connecting` on every retried close) cannot spend it while
+ *     the column reads `open`: the newest write is then an open. A retry that
+ *     never reopened leaves the column `connecting` and live `connecting` — an
+ *     ordinary outage the fork itself recorded, reported as `sessionLost`.
  *   - No message database at all: never stalled. Nothing could tell a stuck
  *     session from a brief drop that already recovered, and mailing an
  *     organization about the second is the wrong trade — `flapping` makes the
@@ -997,6 +1035,90 @@ export function socketStalled(
   return { stalled: true, spent: false }
 }
 
+// ── dropped sessions, as the fork records them ──────────────────────────────
+/** Closes Evolution never retries — stock 2.3.7 and the fork agree (`codesToNotReconnect`). */
+const NOT_RETRIED_CLOSES = new Set([401, 403, 402, 406])
+/**
+ * Baileys' `restartRequired`: the restart right after a QR scan, which the fork
+ * retries at once. Not a dropped session — on a re-pair after a logout the row
+ * still carries the old `ownerJid`, and reading this as `sessionLost` would
+ * call a pairing in progress a lost session for the second it lasts.
+ */
+const RESTART_REQUIRED = 515
+/** Baileys' `connectionReplaced`: another socket on the same credentials took over. */
+const CONNECTION_REPLACED = 440
+/**
+ * How far apart `disconnectionAt` and `updatedAt` may be and still be one write.
+ * The fork sets both in one `instance.update` (`recordDisconnection`), from the
+ * same host clock, milliseconds apart; any later write — a QR, a logout's
+ * cleanup, an open — moves `updatedAt` on and leaves `disconnectionAt` behind.
+ */
+const DISCONNECTION_RECORD_SKEW_MS = 5_000
+
+/**
+ * The reason code of a retryable close Evolution is retrying right now, when
+ * the row says so — `undefined` otherwise.
+ *
+ * **Why the column is not enough on the fork.** Stock 2.3.7 leaves the column
+ * `open` while it retries a close, and `sessionLost` was built on exactly that
+ * disagreement. The fork (ju-li/evolution-api-v2 #6, #10, #51) writes
+ * `connecting` with `disconnectionAt` and `disconnectionReasonCode` on every
+ * close it retries, backs off to every 5 min and never gives up — so a dropped
+ * session reads column `connecting`, live `connecting`, the same as a QR
+ * waiting to be scanned. Only the recorded reason tells them apart.
+ *
+ * All four must hold:
+ *   - column `connecting` — the fork writes `close` only with a code it will
+ *     not retry; a `close` carrying a retryable code is a stale reason left
+ *     under a logout's cleanup (`cleaningUp` writes the column alone);
+ *   - a reason code that is set, not one of `NOT_RETRIED_CLOSES`, and not
+ *     `RESTART_REQUIRED`;
+ *   - `disconnectionAt` within `DISCONNECTION_RECORD_SKEW_MS` of `updatedAt`,
+ *     i.e. the row's newest write *is* that record. A logout during the backoff
+ *     followed by a re-pair leaves the old retryable code under a QR's
+ *     `connecting`; without this, that pairing would read as a lost session.
+ *     A write time this read could not get turns the rule off.
+ *
+ * **Stock 2.3.7 never matches**: it writes the reason only on a close it will
+ * not retry, so this is safe to ship before the Evolution switch.
+ */
+export function recordedRetryableClose(row: {
+  connectionStatus?: string
+  disconnectionAt?: string
+  disconnectionReasonCode?: number
+  rowWrittenAt?: string
+}): number | undefined {
+  const code = row.disconnectionReasonCode
+  if (row.connectionStatus !== 'connecting' || code === undefined) return undefined
+  if (NOT_RETRIED_CLOSES.has(code) || code === RESTART_REQUIRED) return undefined
+
+  const recordedAt = row.disconnectionAt ? Date.parse(row.disconnectionAt) : Number.NaN
+  const writtenAt = row.rowWrittenAt ? Date.parse(row.rowWrittenAt) : Number.NaN
+  if (Number.isNaN(recordedAt) || Number.isNaN(writtenAt)) return undefined
+  return Math.abs(writtenAt - recordedAt) <= DISCONNECTION_RECORD_SKEW_MS ? code : undefined
+}
+
+/**
+ * The account was linked, and Evolution's live socket is down with the phone
+ * still linked — answered by reconnecting, never by a QR scan.
+ *
+ *   - `ownerJid`: a fresh instance has none (written only on `open`, kept
+ *     through logout — so a logged-out account still needs the next arm to fail).
+ *   - live known and not `open`: `undefined` is Evolution not answering, which
+ *     says nothing about the session.
+ *   - column `open` (stock 2.3.7: a retried close touches only the in-memory
+ *     state), or a retryable close the fork recorded (`recordedRetryableClose`).
+ *     A logout (401 or the column alone) and a QR on screen match neither.
+ */
+export function isSessionLost(
+  row: { connectionStatus?: string, ownerJid?: string },
+  live: ConnectionState | undefined,
+  retryableClose: number | undefined,
+): boolean {
+  if (!row.ownerJid || live === undefined || live === 'open') return false
+  return row.connectionStatus === 'open' || retryableClose !== undefined
+}
+
 /** Drop what this module has cached about one connection. */
 export function forgetInstanceStatus(instanceId: string): void {
   apiRowCache.delete(instanceId)
@@ -1015,10 +1137,11 @@ async function readStatus(
   const viaSql = canReadMessages(instance)
   const storedChurn: RowChurn = { since: instance.row_churn_since, seenAt: instance.row_churn_seen_at }
 
-  const [live, record, rowWrittenAt, sqlCounts] = await Promise.all([
+  const [live, record, rowWrittenAt, reasonCode, sqlCounts] = await Promise.all([
     liveConnectionState(evolution, instance).catch(() => undefined),
     viaSql ? sqlInstanceRecord(instance) : undefined,
     viaSql ? sqlRowWrittenAt(instance) : undefined,
+    viaSql ? sqlDisconnectionReason(instance) : undefined,
     viaSql && options.counts ? cachedSqlCounts(instance, Boolean(options.freshCounts)) : undefined,
   ])
 
@@ -1027,8 +1150,9 @@ async function readStatus(
   // No SQL counts at all (no message database, counts not asked for) or a
   // failed count that `fetchInstances` may stand in for. A slow count may not.
   const countsFromApi = options.counts && !stats && (sqlCounts?.fallback ?? true)
+  let api: EvolutionInstanceRow | undefined
   if (!row || countsFromApi) {
-    const api = await cachedApiRow(instance, evolution, live, Boolean(options.freshCounts))
+    api = await cachedApiRow(instance, evolution, live, Boolean(options.freshCounts))
     row ??= api
     if (options.counts) stats ??= api && statsFromApiRow(api)
   }
@@ -1040,9 +1164,21 @@ async function readStatus(
 
   if (live === 'open' || row.ownerJid) notePaired(instance)
 
+  // Reason and write time from the source that supplied the row — the SQL
+  // row's two side reads, or the `fetchInstances` row, which carries both —
+  // never one source's column judged against the other's write time.
+  const fromApi = row !== record
+  const retryableClose = recordedRetryableClose({
+    connectionStatus: row.connectionStatus,
+    disconnectionAt: row.disconnectionAt ?? undefined,
+    disconnectionReasonCode: fromApi ? api?.disconnectionReasonCode ?? undefined : reasonCode,
+    rowWrittenAt: fromApi ? api?.updatedAt ?? undefined : rowWrittenAt,
+  })
+
   const { churn, flapping } = rowChurn(storedChurn, {
     columnOpen: row.connectionStatus === 'open',
     rowWrittenAt,
+    retryableClose,
   })
 
   // A loop is the stronger diagnosis and names the same fix; reporting both
@@ -1058,7 +1194,7 @@ async function readStatus(
 
   return {
     state: live ?? 'unknown',
-    sessionLost: row.connectionStatus === 'open' && live !== undefined && live !== 'open',
+    sessionLost: isSessionLost(row, live, retryableClose),
     flapping,
     ...(stalled && { stalled: true }),
     ...((flapping || stalled) && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
@@ -1122,6 +1258,30 @@ async function sqlRowWrittenAt(instance: AppInstance): Promise<string | undefine
         + 'WhatsApp reconnect loop is not detected. Add it to the status grants in '
         + 'docs/whatsapp.md "Reading and searching messages".',
       failed: '[instances] could not read when Evolution last wrote an instance row; reconnect-loop detection skipped:',
+    })
+    return undefined
+  }
+}
+
+/**
+ * The reason code of Evolution's last recorded close, or `undefined` for "none,
+ * or cannot tell" — never throws. Uncached, like the row it is judged with.
+ * Unreadable (a role granted before this column was read) turns off only the
+ * fork's arm of `sessionLost` — the stock rule is unaffected — so it is logged
+ * once per five minutes and has no fallback.
+ */
+async function sqlDisconnectionReason(instance: AppInstance): Promise<number | undefined> {
+  if (sqlDenied('disconnection reason', instance)) return undefined
+  try {
+    return await readInstanceDisconnectionReason(instance)
+  }
+  catch (error) {
+    noteSqlFallback('disconnection reason', instance, error, {
+      denied: '[instances] the Evolution database role cannot read "Instance"."disconnectionReasonCode", '
+        + 'so a dropped WhatsApp session on an Evolution that records retried closes reads as unpaired. '
+        + 'Add it to the status grants in docs/whatsapp.md "Reading and searching messages".',
+      failed: '[instances] could not read the reason of Evolution\'s last recorded close; dropped-session '
+        + 'detection falls back to the stored status alone:',
     })
     return undefined
   }
@@ -1804,9 +1964,15 @@ export const RECENT_HISTORY_NOTE
 
 // ── internals ──────────────────────────────────────────────────────────────
 
-/** One row of `fetchInstances` — the record `readInstanceRecord` reads, plus Prisma's counts. */
+/**
+ * One row of `fetchInstances` — the record `readInstanceRecord` reads, plus Prisma's counts
+ * and the two columns the SQL path reads in statements of their own.
+ */
 interface EvolutionInstanceRow extends EvolutionInstanceRecord {
   name?: string
+  /** Prisma's `@updatedAt`, ISO 8601 — see `recordedRetryableClose`. */
+  updatedAt?: string | null
+  disconnectionReasonCode?: number | null
   _count?: { Message?: number, Chat?: number, Contact?: number }
 }
 
