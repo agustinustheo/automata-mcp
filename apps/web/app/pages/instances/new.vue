@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { Component } from 'vue'
-import { TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
+import { TELEGRAM_FULL_HISTORY_DAYS, TELEGRAM_HISTORY_MESSAGES_PER_CHAT, TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 import {
   AppleIcon,
   CloudIcon,
@@ -143,6 +143,7 @@ const ownServer = ref(false)
 // (`ownServersAllowed` in server/utils/cloud.ts), so the option is not offered.
 // Hiding it is presentation; the server is the control.
 const hosted = useHosted()
+const perChat = TELEGRAM_HISTORY_MESSAGES_PER_CHAT.toLocaleString('en-US')
 watch(hosted, (isHosted) => {
   if (isHosted) ownServer.value = false
 }, { immediate: true })
@@ -446,10 +447,21 @@ async function create() {
                    startTelegramPairing, so this is wording, not control. -->
               <p v-if="recentHistoryOnly" class="text-xs text-muted-foreground">
                 Your plan syncs the last {{ TELEGRAM_RECENT_HISTORY_DAYS }} days of
-                history when the account is linked; everything after that is kept.
+                history when the account is linked, up to {{ perChat }} messages per
+                chat, so a busy group may not reach back that far. Everything after
+                that is kept.
                 <UpgradeLink>
-                  to sync further back.
+                  to sync further back and load more per chat.
                 </UpgradeLink>
+              </p>
+              <!-- Pro on the hosted bridge, whose settings these numbers describe;
+                   a self-hosted operator may have set others. -->
+              <p v-else-if="hosted && !ownServer" class="text-xs text-muted-foreground">
+                Your plan syncs the last {{ TELEGRAM_FULL_HISTORY_DAYS }} days of
+                history when the account is linked, {{ perChat }} messages per chat to
+                start. Everything after that is kept, and you can load {{ perChat }}
+                more for any chat from its Chats list, back to
+                {{ TELEGRAM_FULL_HISTORY_DAYS }} days.
               </p>
             </template>
 

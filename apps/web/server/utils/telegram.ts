@@ -167,6 +167,14 @@ export type BridgeSent = {
   date: string
 }
 
+export type BridgeBackfill = {
+  chatId: string
+  /** Older messages fetched for this chat so far. */
+  count: number
+  /** How many it will fetch before stopping again, day limit permitting. */
+  limit: number
+}
+
 const BRIDGE_REQUEST_DEADLINE_MS = 20_000
 
 /**
@@ -207,6 +215,9 @@ export function createTelegramBridge(creds: TelegramCredentials) {
     reconnect: () => client<BridgeSessionState>(`${session}/reconnect`, { method: 'POST' }),
     logout: () => client<BridgeSessionState>(`${session}/logout`, { method: 'POST' }),
     resolve: (query: string) => client<BridgeResolved>(`${session}/resolve`, { method: 'POST', body: { query } }),
+    // More older history for one chat whose backfill stopped at its message
+    // count. The bridge stores it and fetches at backfill's own pace.
+    backfill: (chatId: string) => client<BridgeBackfill>(`${session}/backfill`, { method: 'POST', body: { chatId } }),
     send: (chatId: string, text: string) => client<BridgeSent>(`${session}/send`, { method: 'POST', body: { chatId, text } }),
     webhook: (url: string, headers: Record<string, string>) => client(`${session}/webhook`, { method: 'PUT', body: { url, headers } }),
   }

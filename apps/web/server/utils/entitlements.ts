@@ -85,6 +85,18 @@ export async function orgRecentHistoryOnly(db: Db, orgId: string): Promise<boole
 }
 
 /**
+ * The refusal for asking a Telegram chat for more older history on a plan that
+ * fetches recent history only. Same shape as `fullHistoryLimitError`.
+ */
+export function moreHistoryLimitError() {
+  return createError({
+    statusCode: 402,
+    statusMessage: 'Your plan syncs a limited amount of Telegram history. Upgrade to load more of a chat\'s history.',
+    data: { code: 'plan_limit', resource: 'history' },
+  })
+}
+
+/**
  * The refusal for asking for a full-history import on a plan that imports
  * recent history only. Same 402 `plan_limit` shape as `limitError`, so the UI
  * offers the Billing page the same way.

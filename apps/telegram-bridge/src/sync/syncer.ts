@@ -856,6 +856,15 @@ export class SessionSync {
 
   // ── backfill ───────────────────────────────────────────────────────────────
 
+  /**
+   * Look for backfill work again — after a chat was given more history to
+   * fetch. A no-op while a run is going, since that run picks the chat up.
+   */
+  wakeBackfill(): void {
+    if (this.stopped) return
+    void this.runBackfill()
+  }
+
   private async runBackfill(): Promise<void> {
     if (this.backfillRunning) return
     this.backfillRunning = true
@@ -904,7 +913,8 @@ export class SessionSync {
     if (chat.type === 'channel' && !this.options.includeBroadcast) {
       return await this.store.stopBackfill(chat.chat_id, 'skipped')
     }
-    if (chat.backfill_count >= this.options.maxPerChat) {
+    const limit = Math.max(chat.backfill_limit ?? 0, this.options.maxPerChat)
+    if (chat.backfill_count >= limit) {
       return await this.store.stopBackfill(chat.chat_id, 'count')
     }
     const peer = inputPeerFor(chat.chat_id, chat.access_hash)
@@ -923,7 +933,7 @@ export class SessionSync {
     let stopped: BackfillStop | null = null
     if (result.ids.length === 0) stopped = 'start'
     else if (kept.length < result.messages.length) stopped = 'days'
-    else if (count >= this.options.maxPerChat) stopped = 'count'
+    else if (count >= limit) stopped = 'count'
 
     await this.store.recordBackfill(chat.chat_id, {
       cursor: result.ids.length > 0 ? Math.min(...result.ids) : null,

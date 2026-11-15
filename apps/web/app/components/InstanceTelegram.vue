@@ -2,7 +2,7 @@
 import { useIntervalFn } from '@vueuse/core'
 import { SendIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import { TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
+import { TELEGRAM_FULL_HISTORY_DAYS, TELEGRAM_HISTORY_MESSAGES_PER_CHAT, TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 
 /**
  * The link-and-dashboard panel for a Telegram connection. Chosen by
@@ -67,6 +67,16 @@ const pairingError = ref('')
 const password = ref('')
 
 type Mode = 'connected' | 'pairing' | 'lost' | 'unreachable' | 'unlinked'
+
+/**
+ * What a chat stopped at the per-chat message limit offers in the chats table:
+ * a manager loads more where the plan allows it, sees Upgrade where it does
+ * not; anyone else sees the fact. The server decides again on the request.
+ */
+const moreHistory = computed<'load' | 'upgrade' | 'view'>(() => {
+  if (!props.canManage) return 'view'
+  return data.value?.historyLimitedByPlan ? 'upgrade' : 'load'
+})
 
 /**
  * **Only a manager enters pairing mode**, for the reason InstanceWhatsapp gives:
@@ -217,6 +227,7 @@ async function unlink() {
 }
 
 const count = new Intl.NumberFormat()
+const hosted = useHosted()
 </script>
 
 <template>
@@ -268,10 +279,20 @@ const count = new Intl.NumberFormat()
         </Button>
         <p v-if="data?.historyLimitedByPlan" class="text-xs text-muted-foreground">
           Your plan syncs the last {{ TELEGRAM_RECENT_HISTORY_DAYS }} days of history when an
-          account is linked; everything that arrives after that is kept.
+          account is linked, up to {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages
+          per chat, so a busy group may not reach back that far. Everything that arrives after
+          that is kept.
           <UpgradeLink>
-            before linking to sync further back.
+            before linking to sync further back and load more per chat.
           </UpgradeLink>
+        </p>
+        <!-- Pro on the hosted bridge; a self-hosted operator may have set other numbers. -->
+        <p v-else-if="hosted && data?.historyLimitedByPlan === false && data?.instance.ownServer !== true" class="text-xs text-muted-foreground">
+          Your plan syncs the last {{ TELEGRAM_FULL_HISTORY_DAYS }} days of history when an
+          account is linked, {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages per
+          chat to start. Everything after that is kept, and you can load
+          {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} more for any chat from its Chats
+          list, back to {{ TELEGRAM_FULL_HISTORY_DAYS }} days.
         </p>
         <p class="text-xs text-muted-foreground">
           This app signs in as an unofficial Telegram client, which Telegram watches
@@ -368,6 +389,7 @@ const count = new Intl.NumberFormat()
         :profile="{ name: data?.profileName || 'Telegram', detail: profileDetail }"
         :stats="data?.stats"
         :can-read-messages="data?.instance.canReadMessages !== false"
+        :more-history="moreHistory"
       />
 
       <p class="text-xs text-muted-foreground">
@@ -385,7 +407,9 @@ const count = new Intl.NumberFormat()
              plan, which changes nothing until the account is linked again. -->
         <template v-if="data?.sync?.historyDays !== undefined">
           Older history reaches back {{ count.format(data.sync.historyDays) }}
-          {{ data.sync.historyDays === 1 ? 'day' : 'days' }}.
+          {{ data.sync.historyDays === 1 ? 'day' : 'days' }}, up to
+          {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages per chat<template v-if="moreHistory === 'load'">;
+            open Chats to load more for one chat</template>.
         </template>
       </p>
     </template>

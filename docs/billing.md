@@ -30,7 +30,7 @@ Self-hosted deployments never run the cloud service.
 | Requests | unlimited, subject to [rate limits](#rate-limits) | the same |
 | Telemetry | always on, stored 30 days | optional, off by default |
 | WhatsApp history at pairing | recent only | recent, or full if chosen |
-| Telegram history at linking | last 90 days | the deployment's setting (365 days by default) |
+| Telegram history at linking | last 90 days, up to 20,000 messages per chat | the deployment's setting (365 days by default), 20,000 messages per chat to start, more per chat on request |
 
 **WhatsApp history.** Every new WhatsApp connection imports the recent history
 by default: what WhatsApp hands any linked browser, rather than everything the
@@ -52,7 +52,13 @@ in `apps/web/server/utils/instances.ts`, with the number in
 bridge stores it on the session, so it is decided at linking, like WhatsApp's:
 an account linked under Pro keeps its longer history after a move to Free, and
 an account linked under Free fetches further back only once it is unlinked and
-linked again. New messages are kept either way, and a bring-your-own bridge is
+linked again. Every plan also stops each chat at `TELEGRAM_BACKFILL_MAX_PER_CHAT`
+messages (20,000 by default), which a busy group reaches long before 90 days.
+The plan copy quotes that number from `TELEGRAM_HISTORY_MESSAGES_PER_CHAT` in
+`apps/web/shared/history.ts`; change both together. On Pro a manager can load
+another 20,000 for one chat from the connection's Chats list, as often as they
+like (`POST /api/instances/:id/telegram/backfill`); the day limit still ends it.
+Free gets 402 `plan_limit` there, by the same `historyLimited` rule. New messages are kept either way, and a bring-your-own bridge is
 never capped. A bridge too old to store the cap makes linking on Free answer
 503, with the reason in the web log, rather than pair uncapped. See
 [What syncs](telegram.md#what-syncs).
