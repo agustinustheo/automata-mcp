@@ -2,7 +2,7 @@
 import { useIntervalFn } from '@vueuse/core'
 import { SendIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import { TELEGRAM_HISTORY_MESSAGES_PER_CHAT, TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
+import { TELEGRAM_FULL_HISTORY_DAYS, TELEGRAM_HISTORY_MESSAGES_PER_CHAT, TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 
 /**
  * The link-and-dashboard panel for a Telegram connection. Chosen by
@@ -227,6 +227,7 @@ async function unlink() {
 }
 
 const count = new Intl.NumberFormat()
+const hosted = useHosted()
 </script>
 
 <template>
@@ -278,10 +279,20 @@ const count = new Intl.NumberFormat()
         </Button>
         <p v-if="data?.historyLimitedByPlan" class="text-xs text-muted-foreground">
           Your plan syncs the last {{ TELEGRAM_RECENT_HISTORY_DAYS }} days of history when an
-          account is linked; everything that arrives after that is kept.
+          account is linked, up to {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages
+          per chat, so a busy group may not reach back that far. Everything that arrives after
+          that is kept.
           <UpgradeLink>
-            before linking to sync further back.
+            before linking to sync further back and load more per chat.
           </UpgradeLink>
+        </p>
+        <!-- Pro on the hosted bridge; a self-hosted operator may have set other numbers. -->
+        <p v-else-if="hosted && data?.historyLimitedByPlan === false && data?.instance.ownServer !== true" class="text-xs text-muted-foreground">
+          Your plan syncs the last {{ TELEGRAM_FULL_HISTORY_DAYS }} days of history when an
+          account is linked, {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages per
+          chat to start. Everything after that is kept, and you can load
+          {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} more for any chat from its Chats
+          list, back to {{ TELEGRAM_FULL_HISTORY_DAYS }} days.
         </p>
         <p class="text-xs text-muted-foreground">
           This app signs in as an unofficial Telegram client, which Telegram watches
