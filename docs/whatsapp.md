@@ -65,7 +65,7 @@ GRANT CONNECT ON DATABASE evolution TO wamcp_search;
 GRANT USAGE ON SCHEMA public TO wamcp_search;
 GRANT SELECT ON "Message" TO wamcp_search;
 -- Connection status: the account's own row and per-account counts.
-GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
+GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "disconnectionReasonCode", "updatedAt")
   ON "Instance" TO wamcp_search;
 GRANT SELECT ("instanceId") ON "Chat", "Contact" TO wamcp_search;
 -- Group names, read from Evolution's own chat rows.
@@ -96,6 +96,15 @@ else keeps working, the log says the column is unreadable, and loops go
 undetected. A stuck session (below) is then reported from the failed calls
 alone, for 30 minutes after the last one, since a reopen by Evolution can't be
 seen to clear it.
+
+`"disconnectionReasonCode"` is how a dropped session is recognised on an
+Evolution that records the closes it retries (the fork,
+`ju-li/evolution-api-v2`): there the stored status reads `connecting` while
+Evolution retries, and the recorded reason is what tells that from a QR waiting
+to be scanned. Stock 2.3.7 never needs it. Without the grant, the log says the
+column is unreadable and, on the fork, a dropped session reads as needing a QR
+scan rather than as **Connection lost**. A role granted before this column was
+read: run the `"Instance"` line again with it added.
 
 ```bash
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
@@ -395,7 +404,7 @@ Worth knowing before you go looking for a bug:
   GRANT CONNECT ON DATABASE evolution TO evo_reader;
   GRANT USAGE ON SCHEMA public TO evo_reader;
   GRANT SELECT ON "Message" TO evo_reader;
-  GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
+  GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "disconnectionReasonCode", "updatedAt")
     ON "Instance" TO evo_reader;
   GRANT SELECT ("instanceId") ON "Chat", "Contact" TO evo_reader;
   GRANT SELECT ("remoteJid", "name") ON "Chat" TO evo_reader;

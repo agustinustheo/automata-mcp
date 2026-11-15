@@ -150,9 +150,9 @@ function messagePool(instance: AppInstance, resolved: { url: string, guard: bool
 }
 
 /**
- * The pool for the two status reads — `readInstanceRecord` and
- * `readInstanceRowWrittenAt`, primary-key lookups the dashboard, MCP status and
- * the alert sweep depend on.
+ * The pool for the status reads — `readInstanceRecord`,
+ * `readInstanceRowWrittenAt` and `readInstanceDisconnectionReason`, primary-key
+ * lookups the dashboard, MCP status and the alert sweep depend on.
  *
  * Separate from `evolutionDbFor` on our own server so that no amount of message
  * reading or searching by any account can queue an outage check behind it
@@ -308,6 +308,35 @@ export async function readInstanceRowWrittenAt(instance: AppInstance): Promise<s
     WHERE id = ${instanceId}
   `
   return row?.updatedAt?.toISOString()
+}
+
+/**
+ * The status code of the last close Evolution recorded on this account's
+ * `"Instance"` row (`"disconnectionReasonCode"`) — or `undefined` when there is
+ * no row or the column is NULL.
+ *
+ * Stock 2.3.7 writes it only on a close it will not retry (401, 403, 402, 406);
+ * the fork (ju-li/evolution-api-v2) also writes it, with `connecting`, on every
+ * close it retries — the one record of a dropped session there, since its
+ * column no longer stays `open` over a dead socket. `sessionLost` in
+ * instances.ts reads it (`recordedRetryableClose`).
+ *
+ * A separate statement for the same reason as `readInstanceRowWrittenAt`: the
+ * least-privilege grant is column by column, and a role granted before this
+ * column was read must lose only this signal, not the whole status row.
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function readInstanceDisconnectionReason(instance: AppInstance): Promise<number | undefined> {
+  const sql = await evolutionStatusDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await sql<Array<{ disconnectionReasonCode: number | null }>>`
+    SELECT "disconnectionReasonCode"
+    FROM "Instance"
+    WHERE id = ${instanceId}
+  `
+  return row?.disconnectionReasonCode ?? undefined
 }
 
 /**
