@@ -82,7 +82,13 @@ With this URL set, the dashboard, the connection list, the alert sweep and
 `get-connection-status` read the account's `"Instance"` row by primary key, and
 count only that account's rows, caching the counts for five minutes (the history
 import screen after pairing asks for them fresh; the alert sweep reads no counts
-at all). A role created before these grants existed still works: status falls
+at all). An account with 100,000 messages or more is never counted while a page
+waits: its last counts are shown with their age, and it is recounted in the
+background at most once an hour, one account at a time, on a connection of its
+own with a 60-second limit — on a cold disk, counting a few million rows can take
+longer than the 10 seconds other reads get. With `NUXT_REDIS_URL` set, counts are
+shared between replicas and survive a redeploy. Counts are kept for a week after
+the last count, so an account nobody opens for a few days still shows them. A role created before these grants existed still works: status falls
 back to `fetchInstances`, cached per connection for five minutes, and the web
 log says a grant is missing. A count that is only *slow* — it hit the statement
 timeout, or the account already has a read running — never falls back, since
