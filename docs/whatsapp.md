@@ -2,7 +2,7 @@
 
 ## Which Evolution
 
-The deployment's own Evolution server runs **`evolution-api-reforged` 3.0.1**,
+The deployment's own Evolution server runs **`evolution-api-reforged` 3.1.0**,
 our fork of Evolution API
 ([repo](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged),
 formerly `ju-li/evolution-api-v2`). Every file that names it pins its digest:
@@ -37,12 +37,24 @@ What the fork changes, and why we run it:
   example keys published in Evolution's docs, and warns when the key is under
   32 characters.
 
-Known gap in 3.0.1: a QR code nobody scans is retried for ever. The row stays
-`connecting`, so Evolution starts showing QR codes for it again at every boot.
-It's fixed in the fork after 3.0.1
-([#56](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/56)).
-Until then, such a connection alternates on the dashboard between pairing and
-**Connection lost**.
+- **Retries stop where they can't succeed** (3.1.0,
+  [#56](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/56)).
+  A QR code nobody scans stops after `QRCODE_LIMIT` codes (30 in our compose
+  files): the row goes to `close` and the half-made session is cleaned up, so
+  Evolution no longer shows QR codes for it at every boot. Opening the pairing
+  screen starts a new count. After `RECONNECT_CONFLICT_LIMIT` 440 closes in a
+  row (default 10, `0` = no limit), Evolution stops fighting the other client
+  but keeps the session; see "Stuck reconnecting". A connection that opens no
+  longer carries the last close's code on its row.
+- **Incoming events survive an Evolution restart** (3.1.0). Messages, receipts,
+  chats, contacts and group updates are written to a per-account Redis stream
+  before they're processed and removed once done, so a restart replays what was
+  still queued instead of losing it. This needs `CACHE_REDIS_ENABLED=true` (set
+  in our compose files and the all-in-one image) and a Redis that persists
+  (AOF or RDB; ours run with `--appendonly yes`). `GET
+  /instance/connectionState` also reports the queue's lag. Settings:
+  `EVENT_QUEUE_PERSIST`, `EVENT_QUEUE_ITEM_TIMEOUT_MS`,
+  `EVENT_QUEUE_MAX_ENTRY_BYTES`, `EVENT_QUEUE_MAX_LENGTH`; the defaults fit.
 
 ### Moving from stock Evolution 2.3.7
 
@@ -654,6 +666,15 @@ What's left is a second client using the same session: another Evolution
 pointed at the same `instances` volume or database, for example a staging copy,
 or an old container still running. Stop that one first; restarting ours alone
 starts the fight again.
+
+After `RECONNECT_CONFLICT_LIMIT` 440s in a row (default 10), the fork stops
+retrying and keeps the session. The row reads `close` with code 440. A restart
+does **not** bring such an account back, because Evolution only auto-connects
+rows that are `open` or `connecting`. Once the other client is gone, have an
+admin (or the member who created the connection) open its page in the app. It
+shows the pairing screen, whose first request asks Evolution to connect, and
+Evolution resumes the kept session without a QR scan. The app doesn't yet say
+that another client was holding the session.
 
 **Fix: restart the Evolution service.** On boot it reconnects every account whose
 status is `open` or `connecting` with one socket each. Every account drops
