@@ -1137,7 +1137,9 @@ export function isSessionLost(
 /** Drop what this module has cached about one connection. */
 export function forgetInstanceStatus(instanceId: string): void {
   apiRowCache.delete(instanceId)
-  countsCache.delete(instanceId)
+  // Not the SQL counts: they count stored rows, which a logout or reconnect does
+  // not touch, and dropping a large account's would put its count back on the
+  // request path. Deleting the connection drops them (`forgetInstanceCounts`).
   lastInboundCache.delete(instanceId)
   historySettingCache.forget(instanceId)
   holdRefreshedAt.delete(instanceId)
@@ -1234,12 +1236,28 @@ async function readStatus(
 const COUNTS_TTL_MS = 5 * 60_000
 /** How fresh "fresh" is: two import-screen polls in a row share one count. */
 const FRESH_FLOOR_MS = 2_000
+/** From this many messages an account is counted only in the background (#244). */
+const LARGE_ACCOUNT_MESSAGES = 100_000
+/** How old a large account's counts may get before a background recount is started. */
+const LARGE_COUNTS_TTL_MS = 60 * 60_000
+/**
+ * How long counts are kept at all, here and in Redis — served stale, with their
+ * `asOf`, rather than not at all, to an account nobody has looked at for days.
+ * Every count, inline or background, starts the week again; an account read at
+ * least once a week therefore never loses its counts.
+ */
+const COUNTS_KEEP_MS = 7 * 24 * 60 * 60_000
+/** A background count that failed is not tried again for this long. */
+const BACKGROUND_COUNT_RETRY_MS = 10 * 60_000
 const API_ROW_TTL_MS = 5 * 60_000
 /** See `cachedApiRow`: a cached column that disagrees with the live state is re-read sooner. */
 const API_ROW_DISAGREE_TTL_MS = 60_000
 
-const countsCache = new Map<string, { at: number, stats: InstanceStats }>()
-const countsInFlight = new Map<string, Promise<{ at: number, stats: InstanceStats }>>()
+interface CountsEntry { at: number, stats: InstanceStats }
+const countsCache = new Map<string, CountsEntry>()
+const countsInFlight = new Map<string, Promise<CountsEntry>>()
+/** What other replicas, and the previous deploy, counted. See `sharedRecord`. */
+const sharedCounts = sharedRecord<CountsEntry>({ namespace: 'instance-counts', ttlMs: COUNTS_KEEP_MS })
 const apiRowCache = new Map<string, { at: number, row: EvolutionInstanceRow }>()
 const apiRowInFlight = new Map<string, Promise<EvolutionInstanceRow | undefined>>()
 
@@ -1307,9 +1325,28 @@ async function sqlDisconnectionReason(instance: AppInstance): Promise<number | u
 }
 
 /**
- * Per-account counts, cached for `COUNTS_TTL_MS`. Concurrent callers share one
- * query, as `contactDirectory()` does. `fallback` says whether `readStatus` may
- * ask `fetchInstances` for counts this could not give.
+ * Per-account counts. Concurrent callers share one query, as
+ * `contactDirectory()` does. `fallback` says whether `readStatus` may ask
+ * `fetchInstances` for counts this could not give.
+ *
+ * **Two kinds of account (#244).** One under `LARGE_ACCOUNT_MESSAGES` is counted
+ * on the request path and cached for `COUNTS_TTL_MS` — a few milliseconds even
+ * from disk. A larger one is **never counted on the request path**: its last
+ * counts are served whatever their age (up to `COUNTS_KEEP_MS`, a week; `asOf`
+ * says how old), and once they pass `LARGE_COUNTS_TTL_MS` a recount is queued
+ * for `countInBackground`, which has a minute rather than 10 s. Past the week
+ * they are not shown — a number that old misleads more than a dash — and the
+ * recount is still queued rather than run inline, since the account is known
+ * to be large. On the largest
+ * accounts (~2M messages) the count is ~90 ms warm and over 10 s with the index
+ * on disk, which is what kept timing out. Large is judged by the last count; an
+ * account with none yet that times out is queued in the background too, so the
+ * next read has an answer.
+ *
+ * Counts are shared through Redis (`sharedCounts`) when it is set, so replicas
+ * and the next deploy start from what was last counted rather than from
+ * nothing. In-process otherwise: after a restart the first read of a large
+ * account counts inline once, and may time out into the background.
  *
  * A failed recount serves the previous value if there is one — counts that are
  * a few minutes old are still right enough for a dashboard, and falling back to
@@ -1324,26 +1361,36 @@ async function sqlDisconnectionReason(instance: AppInstance): Promise<number | u
  * the dashboard shows as unavailable. Fallback stays for what it exists for: a
  * missing grant (42501) and a database that cannot be reached.
  *
- * A `fresh` read (the import screen) gets no stale counts on a slow count: a
- * repeated old total reads to it as "the import stopped moving".
+ * A `fresh` read (the import screen) always counts inline, large or not, and
+ * gets no stale counts on a slow count: a repeated old total reads to it as
+ * "the import stopped moving".
  */
 async function cachedSqlCounts(
   instance: AppInstance,
   fresh: boolean,
 ): Promise<{ stats?: InstanceStats, fallback: boolean }> {
-  const cached = countsCache.get(instance.id)
-  const maxAge = fresh ? FRESH_FLOOR_MS : COUNTS_TTL_MS
-  if (cached && Date.now() - cached.at < maxAge) return { stats: countedAt(cached), fallback: false }
+  let cached = countsCache.get(instance.id)
+  if (cached && servable(cached, fresh)) return { stats: countedAt(cached), fallback: false }
   if (sqlDenied('counts', instance)) return { fallback: true }
+
+  // Another replica, or the previous deploy, may have counted since.
+  const shared = await sharedCounts.read(instance.id)
+  if (shared && Number.isFinite(shared.at) && shared.stats && (!cached || shared.at > cached.at)) {
+    cached = shared
+    rememberBounded(countsCache, instance.id, shared, MAX_COUNTS_ENTRIES)
+    if (servable(cached, fresh)) return { stats: countedAt(cached), fallback: false }
+  }
+
+  if (!fresh && cached && isLargeAccount(cached)) {
+    countInBackground(instance)
+    const kept = Date.now() - cached.at < COUNTS_KEEP_MS
+    return { stats: kept ? countedAt(cached) : undefined, fallback: false }
+  }
 
   let counting = countsInFlight.get(instance.id)
   if (!counting) {
     counting = countInstanceRows(instance)
-      .then((stats) => {
-        const entry = { at: Date.now(), stats }
-        countsCache.set(instance.id, entry)
-        return entry
-      })
+      .then(stats => storeCounts(instance.id, stats))
       .finally(() => countsInFlight.delete(instance.id))
     countsInFlight.set(instance.id, counting)
   }
@@ -1353,6 +1400,8 @@ async function cachedSqlCounts(
   }
   catch (error) {
     if (isSlowCount(error)) {
+      // Too slow here is what a large account looks like before its first count.
+      if (isStatementTimeout(error)) countInBackground(instance)
       // Its own key, so a slow count's quiet window cannot hide a broken read's log.
       noteSqlFallback('slow counts', instance, error, slowCountWording(instance))
       return { stats: fresh || !cached ? undefined : countedAt(cached), fallback: false }
@@ -1360,6 +1409,94 @@ async function cachedSqlCounts(
     noteSqlFallback('counts', instance, error)
     return { stats: cached && countedAt(cached), fallback: true }
   }
+}
+
+/** Whether these counts may be served as they are, without a recount. */
+function servable(entry: CountsEntry, fresh: boolean): boolean {
+  const age = Date.now() - entry.at
+  if (fresh) return age < FRESH_FLOOR_MS
+  return age < (isLargeAccount(entry) ? LARGE_COUNTS_TTL_MS : COUNTS_TTL_MS)
+}
+
+function isLargeAccount(entry: CountsEntry): boolean {
+  return entry.stats.messages >= LARGE_ACCOUNT_MESSAGES
+}
+
+/** Keep counts here and in Redis; answers the entry it stored. */
+function storeCounts(instanceId: string, stats: InstanceStats): CountsEntry {
+  const entry = { at: Date.now(), stats }
+  rememberBounded(countsCache, instanceId, entry, MAX_COUNTS_ENTRIES)
+  sharedCounts.write(instanceId, entry)
+  return entry
+}
+
+/** One per connection; far above any deployment's count, a bound rather than a limit. */
+const MAX_COUNTS_ENTRIES = 5_000
+
+// ── background counts (#244) ───────────────────────────────────────────────
+// One at a time per process, oldest request first: a cold count of a large
+// account reads its whole index from disk, and two of them side by side compete
+// for the same I/O they are each waiting on. Each runs on its own one-connection
+// pool (`countInstanceRows`' `background`), never on the slots readers share,
+// and is bounded twice — the statement timeout on the database, and a deadline
+// here for a user-supplied database that would ignore it, so one hung server
+// cannot stop every other account's counts. Not shared across replicas: two that
+// queue the same account at the same moment each count it once, which costs a
+// read, not a wrong answer; a replica that sees a newer count in Redis first does
+// not queue it at all.
+
+const backgroundQueue = new Map<string, AppInstance>()
+const backgroundFailedAt = new Map<string, number>()
+let backgroundCounting: string | undefined
+
+function countInBackground(instance: AppInstance): void {
+  if (backgroundQueue.has(instance.id) || backgroundCounting === instance.id) return
+  const failedAt = backgroundFailedAt.get(instance.id)
+  if (failedAt !== undefined && Date.now() - failedAt < BACKGROUND_COUNT_RETRY_MS) return
+
+  backgroundQueue.set(instance.id, instance)
+  if (backgroundCounting === undefined) {
+    drainBackgroundCounts().catch(error => console.error('[instances] background counts stopped:', error))
+  }
+}
+
+async function drainBackgroundCounts(): Promise<void> {
+  for (;;) {
+    const next = backgroundQueue.entries().next()
+    if (next.done) break
+    const [id, instance] = next.value
+    backgroundQueue.delete(id)
+    backgroundCounting = id
+    try {
+      const stats = await withDeadline(
+        countInstanceRows(instance, { background: true }),
+        BACKGROUND_COUNT_TIMEOUT_MS + 15_000,
+        `background count for connection ${id}`,
+      )
+      storeCounts(id, stats)
+      backgroundFailedAt.delete(id)
+    }
+    catch (error) {
+      rememberBounded(backgroundFailedAt, id, Date.now(), MAX_COUNTS_ENTRIES)
+      noteSqlFallback('background counts', instance, error, {
+        denied: `[instances] the Evolution database role cannot count messages for connection ${id}; `
+          + 'see the status grants in docs/whatsapp.md "Reading and searching messages".',
+        failed: `[instances] background count for connection ${id} failed; serving its last counts, `
+          + `retrying in ${BACKGROUND_COUNT_RETRY_MS / 60_000} minutes:`,
+      })
+    }
+    finally {
+      backgroundCounting = undefined
+    }
+  }
+}
+
+/** A deleted connection's counts: here, in Redis, and in the queue. */
+function forgetInstanceCounts(instanceId: string): void {
+  countsCache.delete(instanceId)
+  sharedCounts.forget(instanceId)
+  backgroundQueue.delete(instanceId)
+  backgroundFailedAt.delete(instanceId)
 }
 
 /** Cached counts with the time they were taken, which the dashboard shows beside them. */
@@ -1375,7 +1512,7 @@ function isSlowCount(error: unknown): boolean {
 /** Said once per five minutes like the others; no grant is involved. */
 function slowCountWording(instance: AppInstance): SqlFallbackWording {
   const failed = `[instances] counting messages for connection ${instance.id} was too slow; `
-    + 'serving the last counts (or none), not falling back to fetchInstances:'
+    + 'serving the last counts (or none), not falling back to fetchInstances, and counting it in the background:'
   return { denied: failed, failed }
 }
 
@@ -1854,7 +1991,9 @@ export async function deleteInstance(
     // A connection on its own server may hold a pool onto that server's message
     // database. Keyed on the row, so it outlives the row unless dropped here.
     await closeKeyedPool(`evo:${instance.id}`)
+    await closeKeyedPool(`evo:${instance.id}:counts`)
     forgetInstanceStatus(instance.id)
+    forgetInstanceCounts(instance.id)
 
     // Uses the same server the instance was created on, with that server's own
     // global key when it brought one.

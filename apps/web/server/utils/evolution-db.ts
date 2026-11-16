@@ -402,23 +402,51 @@ export async function readInstanceRecord(instance: AppInstance): Promise<Evoluti
  * `@@index([instanceId])`, so this reads one account's rows and nobody else's.
  * Still ~100 ms on an 840k-message account, which is why the caller caches it.
  *
+ * `background` is for a count off the request path (`cachedSqlCounts`, #244):
+ * an account with millions of messages, whose index read from disk can outlast
+ * the 10 s every other read gets. It runs on a pool of its own — one connection,
+ * `BACKGROUND_COUNT_TIMEOUT_MS` — so a cold count neither times out nor holds one
+ * of the three slots readers and searches share for a minute.
+ *
  * Raw driver errors, for the same reason as `readInstanceRecord`.
  */
-export async function countInstanceRows(instance: AppInstance): Promise<{ messages: number, chats: number, contacts: number }> {
-  const { query } = await evolutionDbFor(instance)
+export async function countInstanceRows(
+  instance: AppInstance,
+  options: { background?: boolean } = {},
+): Promise<{ messages: number, chats: number, contacts: number }> {
   const instanceId = await resolveEvolutionInstanceId(instance)
-
-  const [row] = await query(sql => sql<Array<{ messages: number, chats: number, contacts: number }>>`
+  const statement = (sql: Sql) => sql<Array<{ messages: number, chats: number, contacts: number }>>`
     SELECT (SELECT count(*) FROM "Message" WHERE "instanceId" = ${instanceId})::int AS messages,
            (SELECT count(*) FROM "Chat"    WHERE "instanceId" = ${instanceId})::int AS chats,
            (SELECT count(*) FROM "Contact" WHERE "instanceId" = ${instanceId})::int AS contacts
-  `)
+  `
+
+  let row: { messages: number, chats: number, contacts: number } | undefined
+  if (options.background) {
+    const resolved = resolveMessageDb(instance)
+    // Leased: a count that runs for most of a minute must not look idle to the sweep.
+    ;[row] = await withKeyedPool(`${poolKeyFor(instance, resolved)}:counts`, resolved.url, {
+      guard: resolved.guard, max: 1, statementTimeoutMs: BACKGROUND_COUNT_TIMEOUT_MS, readOnly: true, jit: false,
+    }, statement)
+  }
+  else {
+    const { query } = await evolutionDbFor(instance)
+    ;[row] = await query(statement)
+  }
   return {
     messages: Number(row?.messages ?? 0),
     chats: Number(row?.chats ?? 0),
     contacts: Number(row?.contacts ?? 0),
   }
 }
+
+/**
+ * The statement timeout of a background count. The coldest count measured in
+ * production (#244: ~2M index entries, plus `"Chat"`/`"Contact"` heap pages)
+ * took just under 10 s; this leaves room for a slower disk without letting a
+ * count run unbounded.
+ */
+export const BACKGROUND_COUNT_TIMEOUT_MS = 60_000
 
 /**
  * Whether this account has any stored message — the unpaired reaper's question
