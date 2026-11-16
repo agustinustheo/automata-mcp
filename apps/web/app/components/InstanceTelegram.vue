@@ -35,7 +35,7 @@ interface StatusResponse {
   username?: string
   number?: string
   error?: string
-  stats?: { messages: number, chats: number }
+  stats?: { messages: number, chats: number, asOf?: string }
   /** `historyDays`: how far back this account's older history is fetched, from the bridge. */
   sync?: { backfilling: boolean, pendingBackfill?: number, dialogsSyncedAt?: string, pausedUntil?: string, historyDays?: number }
   /** Linking now fetches only recent history (`historyLimited`). Policy, not the linked account's fact. */

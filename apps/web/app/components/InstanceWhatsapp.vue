@@ -34,7 +34,11 @@ interface StatusResponse {
   profilePicUrl?: string
   number?: string
   /** Absent when the counts could not be measured in time — unknown, not zero. */
-  stats?: { messages: number, chats: number, contacts: number }
+  stats?: { messages: number, chats: number, contacts: number, asOf?: string }
+  /** When the account last received a message; absent = unknown. */
+  lastInboundAt?: string
+  /** Set instead when the server looked and found nothing received since then. */
+  noInboundSince?: string
   /**
    * The plan imports only the recent history WhatsApp sends any linked device,
    * and refuses a full-history import. Decided by the server.
@@ -599,6 +603,7 @@ const importHistory = () => backToPairing(
         kind="whatsapp"
         :profile="{ name: data?.profileName || 'WhatsApp', detail: data?.number || '—', picUrl: data?.profilePicUrl }"
         :stats="data?.stats"
+        :last-received="{ at: data?.lastInboundAt, noneSince: data?.noInboundSince }"
         :can-read-messages="data?.instance.canReadMessages !== false"
       />
 

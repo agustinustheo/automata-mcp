@@ -437,6 +437,80 @@ export async function hasInstanceMessages(instance: AppInstance): Promise<boolea
   return row?.found === true
 }
 
+/** How far back `readLastInbound` looks. Past it, "none since" is the answer. */
+export const LAST_INBOUND_WINDOW_MS = 7 * 24 * 60 * 60_000
+
+/**
+ * A row stamped further ahead of now than this is not counted. One message with
+ * a clock far in the future would otherwise stand as "last received" until that
+ * date, hiding every silence after it.
+ */
+const LAST_INBOUND_FUTURE_SLACK_S = 10 * 60
+
+/** What `readLastInbound` found, inside the window it looked at. */
+export interface LastInbound {
+  /** WhatsApp's own timestamp of the newest live inbound message, ISO 8601. Absent: none since `since`. */
+  at?: string
+  /** Start of the window looked at, ISO 8601. */
+  since: string
+}
+
+/**
+ * When this account last received a message (#240): the newest row with
+ * `fromMe = false`, control records left out (`notControl`, the chat listing's
+ * rule) and `status@broadcast` left out (a contact's status post is not a
+ * message to the account), by `"messageTimestamp"`.
+ *
+ * **WhatsApp's timestamp, never insert time.** After a stuck session recovers,
+ * Evolution stores a backlog of messages hours old (#238). Ordering by when the
+ * row was written would read that backlog as live traffic; their own
+ * timestamps leave it in the past, where it belongs.
+ *
+ * **The one read for "is this account still receiving".** The dashboard and
+ * `get-connection-status` show it; an inbound-silence health signal (#238) must
+ * read this too, so the time a user sees and the time an alert judges cannot
+ * drift.
+ *
+ * Bounded so it stays an index probe: it needs `message_instance_ts_idx`
+ * (`("instanceId", "messageTimestamp")`, docs/whatsapp.md), walks it newest
+ * first and stops at the first match. Without that index the same question is a
+ * read of every row the account holds, on every status poll — so it answers
+ * `undefined` (unknown) instead, and the missing index is logged once. An
+ * account whose newest rows are all its own sends walks back until it finds
+ * one, so the walk is capped at `LAST_INBOUND_WINDOW_MS`; finding nothing there
+ * answers `{ since }`, which says "none in this window", not "unknown".
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function readLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+  if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
+
+  const now = Date.now()
+  const since = Math.floor((now - LAST_INBOUND_WINDOW_MS) / 1000)
+  const until = Math.floor(now / 1000) + LAST_INBOUND_FUTURE_SLACK_S
+
+  const [row] = await query(sql => sql<Array<{ ts: number }>>`
+    SELECT m."messageTimestamp" AS ts
+    FROM "Message" m
+    WHERE m."instanceId" = ${instanceId}
+      AND m."messageTimestamp" >= ${since}
+      AND m."messageTimestamp" <= ${until}
+      AND m.key->>'fromMe' = 'false'
+      AND m.key->>'remoteJid' <> 'status@broadcast'
+      AND ${notControl(sql)}
+    ORDER BY m."messageTimestamp" DESC
+    LIMIT 1
+  `)
+
+  const ts = Number(row?.ts)
+  return {
+    ...(Number.isFinite(ts) && ts > 0 && { at: new Date(ts * 1000).toISOString() }),
+    since: new Date(since * 1000).toISOString(),
+  }
+}
+
 export interface MessageSearchOptions {
   /** Every term must appear in the message body. Already split, not yet escaped. */
   terms: string[]
@@ -1057,6 +1131,19 @@ const CHAT_TS_INDEX: MessageIndexSpec = {
   missing: '"Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
     + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
     + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
+  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
+  reported: new Set<string>(),
+}
+
+const INSTANCE_TS_INDEX: MessageIndexSpec = {
+  // Up to the second column, so `DESC` and trailing columns count too.
+  shape: '%USING btree ("instanceId", "messageTimestamp"%',
+  partial: false,
+  label: '[last-inbound]',
+  fallback: 'leaving the last received time unknown',
+  missing: '"Message" has no index on ("instanceId", "messageTimestamp"), so the time an account '
+    + 'last received a message is not shown. Create message_instance_ts_idx: see docs/whatsapp.md '
+    + '"Indexes on Evolution\'s tables".',
   cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
   reported: new Set<string>(),
 }

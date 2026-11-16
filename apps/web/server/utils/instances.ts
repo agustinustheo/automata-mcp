@@ -2,7 +2,7 @@ import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
 import { rememberBounded } from './lookup-cache'
 import type { AppInstance } from './app-db'
-import type { EvolutionInstanceRecord } from './evolution-db'
+import type { EvolutionInstanceRecord, LastInbound } from './evolution-db'
 import type { ImapSecurity, ImapTarget } from './imap-client'
 import type { HostedEvent } from './hosted-events'
 import type { Actor } from './org'
@@ -55,14 +55,29 @@ export type InstanceStatus = {
   ownerJid?: string
   disconnectedAt?: string
   /**
+   * WhatsApp's timestamp of the newest live inbound message (#240) — the sign
+   * that messages are still arriving, which the counts are not (cached, raw
+   * rows, moved by a redelivered backlog). See `readLastInbound`. Absent when
+   * unknown: no message database, no timestamp index, or the read failed.
+   */
+  lastInboundAt?: string
+  /**
+   * Set instead of `lastInboundAt` when the read worked and found no inbound
+   * message since this time (`LAST_INBOUND_WINDOW_MS` ago). Absent with
+   * `lastInboundAt` absent too means unknown, never "none".
+   */
+  noInboundSince?: string
+  /**
    * Absent when the counts could not be measured in time (a count that hit the
    * statement timeout with nothing cached, or Evolution unreachable). Absent is
    * never zero: the dashboard shows it as unavailable. See `cachedSqlCounts`.
+   * `asOf`: when they were counted — they are cached, so they lag.
    */
   stats?: {
     messages: number
     chats: number
     contacts: number
+    asOf?: string
   }
 }
 
@@ -1123,6 +1138,7 @@ export function isSessionLost(
 export function forgetInstanceStatus(instanceId: string): void {
   apiRowCache.delete(instanceId)
   countsCache.delete(instanceId)
+  lastInboundCache.delete(instanceId)
   historySettingCache.forget(instanceId)
   holdRefreshedAt.delete(instanceId)
 }
@@ -1137,12 +1153,13 @@ async function readStatus(
   const viaSql = canReadMessages(instance)
   const storedChurn: RowChurn = { since: instance.row_churn_since, seenAt: instance.row_churn_seen_at }
 
-  const [live, record, rowWrittenAt, reasonCode, sqlCounts] = await Promise.all([
+  const [live, record, rowWrittenAt, reasonCode, sqlCounts, lastInbound] = await Promise.all([
     liveConnectionState(evolution, instance).catch(() => undefined),
     viaSql ? sqlInstanceRecord(instance) : undefined,
     viaSql ? sqlRowWrittenAt(instance) : undefined,
     viaSql ? sqlDisconnectionReason(instance) : undefined,
     viaSql && options.counts ? cachedSqlCounts(instance, Boolean(options.freshCounts)) : undefined,
+    viaSql && options.counts ? cachedLastInbound(instance) : undefined,
   ])
 
   let row: EvolutionInstanceRecord | undefined = record
@@ -1154,7 +1171,7 @@ async function readStatus(
   if (!row || countsFromApi) {
     api = await cachedApiRow(instance, evolution, live, Boolean(options.freshCounts))
     row ??= api
-    if (options.counts) stats ??= api && statsFromApiRow(api)
+    if (options.counts) stats ??= api && statsFromApiRow(api, apiRowCache.get(instance.id)?.at)
   }
 
   if (!row) {
@@ -1204,6 +1221,8 @@ async function readStatus(
     number: row.number ?? row.ownerJid?.split('@')[0],
     ownerJid: row.ownerJid ?? undefined,
     disconnectedAt: row.disconnectionAt ?? undefined,
+    ...(lastInbound?.at && { lastInboundAt: lastInbound.at }),
+    ...(lastInbound && !lastInbound.at && { noInboundSince: lastInbound.since }),
     stats,
   }
 }
@@ -1220,7 +1239,7 @@ const API_ROW_TTL_MS = 5 * 60_000
 const API_ROW_DISAGREE_TTL_MS = 60_000
 
 const countsCache = new Map<string, { at: number, stats: InstanceStats }>()
-const countsInFlight = new Map<string, Promise<InstanceStats>>()
+const countsInFlight = new Map<string, Promise<{ at: number, stats: InstanceStats }>>()
 const apiRowCache = new Map<string, { at: number, row: EvolutionInstanceRow }>()
 const apiRowInFlight = new Map<string, Promise<EvolutionInstanceRow | undefined>>()
 
@@ -1314,32 +1333,38 @@ async function cachedSqlCounts(
 ): Promise<{ stats?: InstanceStats, fallback: boolean }> {
   const cached = countsCache.get(instance.id)
   const maxAge = fresh ? FRESH_FLOOR_MS : COUNTS_TTL_MS
-  if (cached && Date.now() - cached.at < maxAge) return { stats: cached.stats, fallback: false }
+  if (cached && Date.now() - cached.at < maxAge) return { stats: countedAt(cached), fallback: false }
   if (sqlDenied('counts', instance)) return { fallback: true }
 
   let counting = countsInFlight.get(instance.id)
   if (!counting) {
     counting = countInstanceRows(instance)
       .then((stats) => {
-        countsCache.set(instance.id, { at: Date.now(), stats })
-        return stats
+        const entry = { at: Date.now(), stats }
+        countsCache.set(instance.id, entry)
+        return entry
       })
       .finally(() => countsInFlight.delete(instance.id))
     countsInFlight.set(instance.id, counting)
   }
 
   try {
-    return { stats: await counting, fallback: false }
+    return { stats: countedAt(await counting), fallback: false }
   }
   catch (error) {
     if (isSlowCount(error)) {
       // Its own key, so a slow count's quiet window cannot hide a broken read's log.
       noteSqlFallback('slow counts', instance, error, slowCountWording(instance))
-      return { stats: fresh ? undefined : cached?.stats, fallback: false }
+      return { stats: fresh || !cached ? undefined : countedAt(cached), fallback: false }
     }
     noteSqlFallback('counts', instance, error)
-    return { stats: cached?.stats, fallback: true }
+    return { stats: cached && countedAt(cached), fallback: true }
   }
+}
+
+/** Cached counts with the time they were taken, which the dashboard shows beside them. */
+function countedAt(entry: { at: number, stats: InstanceStats }): InstanceStats {
+  return { ...entry.stats, asOf: new Date(entry.at).toISOString() }
 }
 
 /** A count that ran out of time, or never got a turn — not a broken read. */
@@ -1402,11 +1427,61 @@ async function cachedApiRow(
   return fetching
 }
 
-function statsFromApiRow(row: EvolutionInstanceRow): InstanceStats {
+function statsFromApiRow(row: EvolutionInstanceRow, at: number | undefined): InstanceStats {
   return {
     messages: row._count?.Message ?? 0,
     chats: row._count?.Chat ?? 0,
     contacts: row._count?.Contact ?? 0,
+    ...(at !== undefined && { asOf: new Date(at).toISOString() }),
+  }
+}
+
+// ── last received ──────────────────────────────────────────────────────────
+
+/**
+ * How long one `readLastInbound` answer serves. Short: it is the dashboard's and
+ * the model's sign of life, and a minute is well under anything it is read
+ * against ("14 min ago"). Long enough that a 15 s dashboard poll and a burst of
+ * MCP status calls share one index probe.
+ */
+const LAST_INBOUND_TTL_MS = 60_000
+
+const lastInboundCache = new Map<string, { at: number, value: LastInbound | undefined }>()
+const lastInboundInFlight = new Map<string, Promise<LastInbound | undefined>>()
+
+/**
+ * `readLastInbound`, cached per connection — `undefined` for unknown, never
+ * throws. A failed read serves the previous answer for one more window if
+ * there is one: an older "last received" is still true, only less fresh.
+ * Failures are logged like the other status reads, never cached as an answer.
+ */
+async function cachedLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
+  const cached = lastInboundCache.get(instance.id)
+  if (cached && Date.now() - cached.at < LAST_INBOUND_TTL_MS) return cached.value
+  if (sqlDenied('last inbound', instance)) return undefined
+
+  let reading = lastInboundInFlight.get(instance.id)
+  if (!reading) {
+    reading = readLastInbound(instance)
+      .then((value) => {
+        lastInboundCache.set(instance.id, { at: Date.now(), value })
+        return value
+      })
+      .finally(() => lastInboundInFlight.delete(instance.id))
+    lastInboundInFlight.set(instance.id, reading)
+  }
+
+  try {
+    return await reading
+  }
+  catch (error) {
+    noteSqlFallback('last inbound', instance, error, {
+      denied: '[instances] the Evolution database role cannot read "Message" for the last received '
+        + 'time. Add the grants in docs/whatsapp.md "Reading and searching messages".',
+      failed: '[instances] could not read when a WhatsApp account last received a message; leaving it unknown:',
+    })
+    if (cached && Date.now() - cached.at < 2 * LAST_INBOUND_TTL_MS) return cached.value
+    return undefined
   }
 }
 
