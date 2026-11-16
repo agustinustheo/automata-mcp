@@ -126,6 +126,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
   ON "Message" ("instanceId", "messageTimestamp" DESC);
 ```
 
+The dashboard's "Last message received" and `lastInboundAt` in
+`get-connection-status` also need this index. They read the account's newest
+inbound message, newest first, and stop at the first one. Without the index that
+read would cover every message the account holds on every status poll, so the
+app leaves the time unknown and logs once that the index is missing.
+
 **Index each chat's messages by time.** This one index serves two reads:
 
 - `read-messages` reads one chat, and `message_instance_ts_idx` still visits
