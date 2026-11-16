@@ -39,7 +39,7 @@ cut that short.
 | Web app | this release | `3000`, or `$PORT` — the only port to publish |
 | Postgres | 16 (Alpine's `postgresql16`) | loopback, port `5432` |
 | Redis | 8.2.9 | `127.0.0.1:6379` |
-| Evolution API | v2.3.7 | `18080` |
+| Evolution API | 3.1.0 ([evolution-api-reforged](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged)) | `18080` |
 | Telegram bridge | this release | `18095` |
 
 The image is built on Evolution's own image, so Evolution runs exactly as it
@@ -113,6 +113,15 @@ deliberate edit of the tag. `:1` gets a release only once it has been tested and
 promoted; `:beta` gets each one as soon as it is published, for anyone who wants
 to try it early. See [Releases](releases.md).
 
+**From a release that ran stock Evolution 2.3.7** (both this image and Compose
+now run our fork, `evolution-api-reforged`): at its first start the fork
+deduplicates `"Message"` and adds a unique index, blocking writes to the table
+until it's done. With more than a few hundred thousand messages, build the index
+first, with the old release still running: see [WhatsApp](whatsapp.md) "Moving
+from stock Evolution 2.3.7". Compose's `EVOLUTION_API_KEY` must be set (it
+already has to be), and the fork refuses to start on an empty key or one of the
+example keys from Evolution's docs. This image generates its own key.
+
 ### When to use Compose instead
 
 Choose Compose when you want to restart, upgrade or back up one service without
@@ -166,7 +175,7 @@ on.
 | `web` | `ghcr.io/ju-li/automata-mcp-web:1` | — | `WEB_PORT` → 3000 |
 | `postgres` | `postgres:16.15-alpine` | — | no |
 | `redis` | `redis:8.2.9-alpine` | `whatsapp` | no |
-| `evolution` | `evoapicloud/evolution-api:v2.3.7` | `whatsapp` | no |
+| `evolution` | `ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0` (digest-pinned) | `whatsapp` | no |
 | `telegram-bridge` | `ghcr.io/ju-li/automata-mcp-telegram-bridge:1` | `telegram` | no |
 
 Only the web app is published. Everything else, including the webhooks
