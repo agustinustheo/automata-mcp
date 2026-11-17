@@ -628,8 +628,8 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   cut off rather than buffered, and at most three downloads run at once per web
   process, one per connection (more answer 429). A download keeps its slot
   until the file has reached the caller — by link, or inside the tool result —
-  at most five minutes, and is cut off sooner if under 64 KiB reaches the
-  caller in any 30 seconds, so the three bound the files held too. Evolution itself is not bounded by this: it
+  at most five minutes — and a link is cut off sooner if the caller takes
+  under 64 KiB in any 30 seconds — so the three bound the files held too. Evolution itself is not bounded by this: it
   downloads and base64-encodes the whole file before answering, whatever its
   size (WhatsApp documents go up to 2 GB, and the sender's stated size may be
   missing or wrong), so size Evolution's memory for the largest files your
@@ -653,7 +653,8 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   by its id alone when downloading, and the id is the sender's choice, so it can
   repeat. Wherever the `message_instance_key_id_idx` index below exists, on any
   engine, a download is refused (409) when another message of the account
-  shares the id, checked before and again after Evolution answers. Without the
+  shares the id — in another chat, in the other direction, or from another
+  sender in the same group — checked before and again after Evolution answers. Without the
   index, media downloads answer 501 on a server that does not report a 2.x
   version, rather than scan the account; stock 2.3.7 downloads from the message
   the app sends, so there the check is skipped.

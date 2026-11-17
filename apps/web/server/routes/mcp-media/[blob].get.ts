@@ -116,6 +116,13 @@ export default defineEventHandler(async (event) => {
         throw error
       }
       try {
+        // A reported size over the cap is refused before anything is sent; the
+        // pipe holds the stream to the cap either way.
+        if (opened.meta.size !== undefined && opened.meta.size > opened.cap) {
+          await opened.body.cancel().catch(() => {})
+          record(false)
+          throw createError({ statusCode: 413, statusMessage: 'File larger than this connector fetches.' })
+        }
         // The bridge reports a size only when it is exact (a document's, or the
         // photo size it downloads) and fails a stream that ends short of it.
         headers(opened.meta.mimeType, opened.meta.fileName, opened.meta.size)
