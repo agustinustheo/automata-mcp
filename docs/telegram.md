@@ -178,6 +178,10 @@ and message `id`, through the bridge's `GET /sessions/:id/media`.
   disconnects, and runs at most two at once.
 - **Not downloadable:** self-destructing media, and anything while the account
   is not online (`get-telegram-status`).
+- **A link download must finish within 90 seconds** (the app's deadline on the
+  bridge request; the bridge's own is 120). The stream follows the reader's
+  pace, so a reader slower than about 280 KB/s cannot fetch a 25 MiB file and
+  gets a broken download, never a short one.
 
 ## One bridge process at a time
 

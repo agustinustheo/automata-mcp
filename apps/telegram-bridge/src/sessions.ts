@@ -665,6 +665,7 @@ export class SessionManager {
   async media(id: string, chatId: string, messageId: number, maxBytes: number, signal: AbortSignal): Promise<{
     headers: Record<string, string>
     chunks: AsyncIterable<Buffer>
+    signal: AbortSignal
   }> {
     // A download holds a Telegram connection's attention for its duration, in a
     // process every linked account shares: a few at a time, the rest refused.
@@ -684,7 +685,7 @@ export class SessionManager {
       const headers: Record<string, string> = {
         'content-type': info.mimeType,
         'x-media-type': info.mediaType,
-        ...(info.fileName && { 'x-media-file-name': encodeURIComponent(info.fileName) }),
+        ...(info.fileName && { 'x-media-file-name': encodeURIComponent((info.fileName as string & { toWellFormed(): string }).toWellFormed()) }),
         ...(info.size !== undefined && { 'x-media-size': String(info.size) }),
       }
       const release = () => { this.mediaInFlight-- }
@@ -693,7 +694,9 @@ export class SessionManager {
         // teleproto checks `signal` only between chunk requests; one stalled
         // request would outlive the deadline and the caller. So every wait for a
         // chunk is bounded by `stop` too: on abort this stream ends at once and
-        // gives its slot back, and the abandoned request settles on its own.
+        // gives its slot back, and the abandoned request settles on its own —
+        // outside the slot count, bounded by the per-connection budget for
+        // costly tools that every download is charged against.
         const iterator = client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })[Symbol.asyncIterator]()
         try {
           for (;;) {
@@ -709,6 +712,11 @@ export class SessionManager {
           // teleproto's loop may simply stop on an aborted signal rather than
           // throw: a stream cut short must never end as if the file were whole.
           if (stop.aborted) throw stopped()
+          // Nor may a short read: teleproto takes any short chunk as the end of
+          // the file. A document's size is exact, so hold it to it.
+          if (info.exactSize && sent !== info.size) {
+            throw new HttpError(502, 'Telegram ended the file early.')
+          }
         }
         catch (error) {
           if (stop.aborted) throw stopped()
@@ -721,7 +729,7 @@ export class SessionManager {
         }
       })()
       handedOff = true
-      return { headers, chunks }
+      return { headers, chunks, signal: stop }
     }
     finally {
       if (!handedOff) this.mediaInFlight--

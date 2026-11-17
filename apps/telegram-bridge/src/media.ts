@@ -12,12 +12,14 @@ export interface MediaInfo {
   mimeType: string
   fileName?: string
   size?: number
+  /** `size` is the file's exact length (a document's), not an estimate. */
+  exactSize?: boolean
 }
 
 export function mediaInfoOf(media: Api.TypeMessageMedia | undefined): MediaInfo | undefined {
   if (media instanceof Api.MessageMediaPhoto) {
     if (media.ttlSeconds || !(media.photo instanceof Api.Photo)) return undefined
-    return { mediaType: 'photo', mimeType: 'image/jpeg', size: largestPhotoSize(media.photo) }
+    return { mediaType: 'photo', mimeType: 'image/jpeg', size: downloadedPhotoSize(media.photo) }
   }
 
   if (media instanceof Api.MessageMediaDocument) {
@@ -36,25 +38,23 @@ export function mediaInfoOf(media: Api.TypeMessageMedia | undefined): MediaInfo 
       mediaType,
       mimeType: cleanMimeType(document.mimeType),
       ...(fileName && { fileName }),
-      ...(Number.isSafeInteger(size) && size >= 0 && { size }),
+      ...(Number.isSafeInteger(size) && size >= 0 && { size, exactSize: true }),
     }
   }
 
   return undefined
 }
 
-/** The size of the photo size teleproto downloads by default: the largest. */
-function largestPhotoSize(photo: Api.Photo): number | undefined {
-  let largest: number | undefined
-  for (const size of photo.sizes) {
-    const bytes = size instanceof Api.PhotoSize
-      ? size.size
-      : size instanceof Api.PhotoSizeProgressive
-        ? Math.max(0, ...size.sizes)
-        : undefined
-    if (bytes !== undefined && (largest === undefined || bytes > largest)) largest = bytes
-  }
-  return largest
+/**
+ * The size of the photo size teleproto downloads by default: the **last** entry
+ * of `sizes` (`Utils.getFileInfo`), which is usually but not always the largest.
+ * A progressive size reports its stages; the last stage is the whole image.
+ */
+function downloadedPhotoSize(photo: Api.Photo): number | undefined {
+  const last = photo.sizes[photo.sizes.length - 1]
+  if (last instanceof Api.PhotoSize) return last.size
+  if (last instanceof Api.PhotoSizeProgressive) return last.sizes[last.sizes.length - 1]
+  return undefined
 }
 
 export function formatBytes(bytes: number): string {
