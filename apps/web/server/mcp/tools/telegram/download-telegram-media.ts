@@ -6,8 +6,10 @@ import { z } from 'zod'
  * "All actions"), chat scope asserted before anything is fetched, small files
  * inline and larger ones by a signed URL only this token can follow.
  *
- * Telegram does not report a file's size in the synced row, so `auto` downloads
- * first and then decides; `url` skips the download and lets the link fetch it.
+ * Telegram does not report a file's size in the synced row, so `auto` first
+ * asks the bridge for the file capped at the inline limit: the bridge refuses
+ * a larger one from Telegram's reported size before downloading (413), and the
+ * answer is then a link, which fetches the file once, when followed.
  */
 export default defineKindTool({
   name: 'download-telegram-media',
@@ -18,9 +20,10 @@ export default defineKindTool({
     + 'audio file, sticker or document. Pass the `chatId` and the message `id` exactly as '
     + 'read-telegram-messages returned them; messages with a file carry `media`. Images come back '
     + 'as images and other files as embedded files, when small enough; a larger file comes back as '
-    + 'a `url` that works for ten minutes with this connection\'s Authorization header and no other. '
-    + '`delivery` chooses: `auto` (default) inlines small files, `url` always returns a link, '
-    + '`inline` never does. Self-destructing media is not downloadable, and the account must be '
+    + 'a `url` that works for ten minutes when fetched with this connection\'s Authorization header, '
+    + 'and only for this token (a client that puts the token in the URL path cannot follow it: use '
+    + '`inline`). `delivery` chooses: `auto` (default) inlines small files, `url` always returns a '
+    + 'link, `inline` never does. Self-destructing media is not downloadable, and the account must be '
     + 'online (get-telegram-status). Fetch only what the task needs: each call downloads the file.',
   annotations: {
     readOnlyHint: true,
@@ -43,26 +46,27 @@ export default defineKindTool({
     assertChatAllowed(auth.scope, chatId)
     const mediaKind = await findTelegramMedia(auth, chatId, messageId)
     const inlineMax = mediaInlineMaxBytes()
-    const signed = () => signMediaUrl({ k: 'telegram', i: auth.instance.id, t: auth.tokenId, c: chatId, m: String(messageId) })
-
-    if (delivery === 'url') {
-      const link = signed()
-      if (!link) throw signedUrlUnavailable(undefined, inlineMax)
-      return mediaUrlResult({ chatId, messageId, media: mediaKind }, link.url, link.expiresAt)
+    const link = () => {
+      const signed = signMediaUrl({ k: 'telegram', i: auth.instance.id, t: auth.tokenId, c: chatId, m: String(messageId) })
+      if (!signed) throw signedUrlUnavailable(undefined, inlineMax)
+      return mediaUrlResult({ chatId, messageId, media: mediaKind }, signed.url, signed.expiresAt)
     }
 
-    const { meta, file } = await downloadTelegramMedia(auth, chatId, messageId, mediaMaxBytes())
-    const described = { chatId, messageId, ...meta }
-    if (file.data.length <= inlineMax) return mediaInlineResult(described, file)
+    if (delivery === 'url') return link()
 
-    if (delivery === 'inline') {
-      throw createError({
-        statusCode: 413,
-        message: `This file is ${formatMediaBytes(file.data.length)}, over the ${formatMediaBytes(inlineMax)} returned inline. Call again with delivery: "url".`,
-      })
+    try {
+      const { meta, file } = await downloadTelegramMedia(auth, chatId, messageId, inlineMax)
+      return mediaInlineResult({ chatId, messageId, ...meta }, file)
     }
-    const link = signed()
-    if (!link) throw signedUrlUnavailable(file.data.length, inlineMax)
-    return mediaUrlResult(described, link.url, link.expiresAt)
+    catch (error) {
+      if (httpStatusOf(error) !== 413) throw error
+      if (delivery === 'inline') {
+        throw createError({
+          statusCode: 413,
+          message: `This file is over the ${formatBytes(inlineMax)} returned inline. Call again with delivery: "url".`,
+        })
+      }
+      return link()
+    }
   },
 })

@@ -30,11 +30,12 @@ export default defineKindTool({
     + 'returned them; read-messages marks such messages with `hasMedia`, `mediaType`, `mimetype` '
     + 'and, when known, `fileName` and `fileSize`. Images come back as images and other files '
     + 'as embedded files, when small enough; a larger file comes back as a `url` that works for '
-    + 'ten minutes with this connection\'s Authorization header and no other. `delivery` chooses: '
-    + '`auto` (default) inlines small files, `url` always returns a link, `inline` never does. '
-    + 'View-once media is not downloadable. Old media may have expired on WhatsApp\'s servers; '
-    + 'it can then be fetched only while the phone is online. Fetch only what the task needs: '
-    + 'each call downloads the file.',
+    + 'ten minutes when fetched with this connection\'s Authorization header, and only for this '
+    + 'token (a client that puts the token in the URL path cannot follow it: use `inline`). '
+    + '`delivery` chooses: `auto` (default) inlines small files, `url` always returns a link, '
+    + '`inline` never does. View-once media is not downloadable. Old media may have expired on '
+    + 'WhatsApp\'s servers; it can then be fetched only while the phone is online. Fetch only what '
+    + 'the task needs: each call downloads the file.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -60,33 +61,28 @@ export default defineKindTool({
     if (claimed !== undefined && claimed > maxBytes) {
       throw createError({
         statusCode: 413,
-        message: `This file is about ${formatMediaBytes(claimed)}, larger than the ${formatMediaBytes(maxBytes)} this connector fetches.`,
+        message: `This file is about ${formatBytes(claimed)}, larger than the ${formatBytes(maxBytes)} this connector fetches.`,
       })
     }
 
     const meta = { jid, messageId, ...target.meta }
-    const signed = () => signMediaUrl({ k: 'whatsapp', i: auth.instance.id, t: auth.tokenId, c: jid, m: messageId })
+    const link = (described: Record<string, unknown>, size: number | undefined) => {
+      const signed = signMediaUrl({ k: 'whatsapp', i: auth.instance.id, t: auth.tokenId, c: jid, m: messageId })
+      if (!signed) throw signedUrlUnavailable(size, inlineMax)
+      return mediaUrlResult(described, signed.url, signed.expiresAt)
+    }
 
     // Known to be large, or the caller asked for a link: no download here — the
     // URL fetches it when followed.
     if (delivery === 'url' || (delivery === 'auto' && claimed !== undefined && claimed > inlineMax)) {
-      const link = signed()
-      if (!link) throw signedUrlUnavailable(claimed, inlineMax)
-      return mediaUrlResult(meta, link.url, link.expiresAt)
+      return link(meta, claimed)
     }
 
-    const file = await downloadWhatsappMedia(auth, target, maxBytes)
+    // The size is a claim: fetch capped at the inline limit when that is all
+    // the caller will accept, at the overall limit otherwise.
+    const file = await downloadWhatsappMedia(auth, target, delivery === 'inline' ? inlineMax : maxBytes)
     const fetched = { ...meta, mimeType: file.mimeType, size: file.data.length, ...(file.fileName && { fileName: file.fileName }) }
     if (file.data.length <= inlineMax) return mediaInlineResult(fetched, file)
-
-    if (delivery === 'inline') {
-      throw createError({
-        statusCode: 413,
-        message: `This file is ${formatMediaBytes(file.data.length)}, over the ${formatMediaBytes(inlineMax)} returned inline. Call again with delivery: "url".`,
-      })
-    }
-    const link = signed()
-    if (!link) throw signedUrlUnavailable(file.data.length, inlineMax)
-    return mediaUrlResult(fetched, link.url, link.expiresAt)
+    return link(fetched, file.data.length)
   },
 })

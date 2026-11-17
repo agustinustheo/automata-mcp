@@ -5,7 +5,7 @@ import { digestsEqual, hashKey, mintKey, seal, sessionContext, unseal, webhookCo
 import type { Sql } from './db.ts'
 import { HttpError, describeError, telegramNotConfigured } from './http-error.ts'
 import { SessionLocks } from './locks.ts'
-import { type MediaInfo, mediaInfoOf } from './media.ts'
+import { type MediaInfo, formatBytes, mediaInfoOf } from './media.ts'
 import { chatRow, entityId, inputPeerFor, markedId, usersOf } from './sync/convert.ts'
 import { type BackfillStop, type ChatListing, SyncStore } from './sync/store.ts'
 import { type BackfillOptions, SessionSync, type SyncStatus, heapMb } from './sync/syncer.ts'
@@ -233,6 +233,8 @@ const REVOKED = new Set([
 const NOT_FOUND = new Set(['USERNAME_NOT_OCCUPIED', 'USERNAME_INVALID', 'PHONE_NOT_OCCUPIED'])
 
 export class SessionManager {
+  /** Media downloads running now; see `media`. */
+  private mediaInFlight = 0
   private readonly sql: Sql
   private readonly config: BridgeConfig
   private readonly locks: SessionLocks
@@ -655,7 +657,28 @@ export class SessionManager {
    * `maxBytes` is refused from its reported size before downloading, and again
    * on the bytes.
    */
-  async media(id: string, chatId: string, messageId: number, maxBytes: number): Promise<{
+  async media(id: string, chatId: string, messageId: number, maxBytes: number, signal: AbortSignal): Promise<{
+    mediaType: MediaInfo['mediaType']
+    mimeType: string
+    fileName?: string
+    size: number
+    data: string
+  }> {
+    // A file is held in memory several times over while it is encoded, in a
+    // process every linked account shares: a few at a time, the rest refused.
+    if (this.mediaInFlight >= MEDIA_DOWNLOADS_IN_FLIGHT) {
+      throw new HttpError(429, 'Too many file downloads are in progress on the bridge. Try again in a few seconds.')
+    }
+    this.mediaInFlight++
+    try {
+      return await this.downloadOne(id, chatId, messageId, maxBytes, signal)
+    }
+    finally {
+      this.mediaInFlight--
+    }
+  }
+
+  private async downloadOne(id: string, chatId: string, messageId: number, maxBytes: number, signal: AbortSignal): Promise<{
     mediaType: MediaInfo['mediaType']
     mimeType: string
     fileName?: string
@@ -691,19 +714,40 @@ export class SessionManager {
       throw new HttpError(422, 'This message carries no downloadable file (self-destructing media is not downloadable).')
     }
     if (info.size !== undefined && info.size > maxBytes) {
-      throw new HttpError(413, `This file is ${info.size} bytes, over the ${maxBytes} this connector fetches.`)
+      throw new HttpError(413, `This file is ${formatBytes(info.size)}, over the ${formatBytes(maxBytes)} this connector fetches.`)
     }
 
+    // Stopped by whichever comes first: the caller disconnecting, the deadline,
+    // or the bytes passing the cap (a reported size is Telegram's, not a promise).
+    const stop = new AbortController()
+    const timer = setTimeout(() => stop.abort(), MEDIA_DOWNLOAD_DEADLINE_MS)
+    const onGone = () => stop.abort()
+    signal.addEventListener('abort', onGone, { once: true })
+    let overCap = false
     let data: string | Buffer | undefined
     try {
-      data = await client.downloadMedia(message, {})
+      data = await client.downloadMedia(message, {
+        signal: stop.signal,
+        progressCallback: (downloaded) => {
+          if (Number(downloaded.toString()) > maxBytes) {
+            overCap = true
+            stop.abort()
+          }
+        },
+      })
     }
     catch (error) {
+      if (overCap) throw new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
+      if (stop.signal.aborted) throw new HttpError(504, 'Downloading the file from Telegram took too long.')
       throw toHttpError(error)
+    }
+    finally {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onGone)
     }
     if (!Buffer.isBuffer(data)) throw new HttpError(502, 'Telegram returned no file for this message.')
     if (data.length > maxBytes) {
-      throw new HttpError(413, `This file is ${data.length} bytes, over the ${maxBytes} this connector fetches.`)
+      throw new HttpError(413, `This file is ${formatBytes(data.length)}, over the ${formatBytes(maxBytes)} this connector fetches.`)
     }
 
     return {
@@ -1308,6 +1352,11 @@ function parseResolveQuery(query: string): { username: string } | { phone: strin
  * wait, 404 for "no such user", 422 for any other refusal, carrying Telegram's
  * code. Anything that is not an RPC error is rethrown and becomes a 500.
  */
+/** Media downloads one bridge runs at once. */
+const MEDIA_DOWNLOADS_IN_FLIGHT = 2
+/** One download's deadline, whatever the app's own is. */
+const MEDIA_DOWNLOAD_DEADLINE_MS = 120_000
+
 function toHttpError(error: unknown): HttpError {
   const code = describeError(error)
   if (/^FLOOD_(PREMIUM_)?WAIT/.test(code)) {

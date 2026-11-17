@@ -148,6 +148,9 @@ export default defineNuxtConfig({
     // server/utils/media.ts.
     mediaMaxBytes: String(25 * 1024 * 1024),
     mediaInlineMaxBytes: String(5 * 1024 * 1024),
+    // Seals the signed download URLs. Unset = a random key per process (links
+    // then end with the process); set it for several replicas.
+    mediaUrlSecret: '',
 
     // Per-minute budgets on /mcp, so one runaway agent loop cannot slow the
     // shared backends for everyone: every request per token and per

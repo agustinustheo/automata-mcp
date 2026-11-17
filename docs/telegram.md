@@ -169,7 +169,9 @@ and message `id`, through the bridge's `GET /sessions/:id/media`.
 - **Sizes.** Same as WhatsApp: up to `NUXT_MEDIA_INLINE_MAX_BYTES` (5 MiB) inline,
   up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) as a 10-minute signed `/mcp-media/` link
   that only the same token can follow. The bridge also refuses anything over
-  50 MiB, checked from the size Telegram reports before downloading.
+  50 MiB, checked from the size Telegram reports before downloading and again
+  while downloading, gives each download a deadline, stops it when the app
+  disconnects, and runs at most two at once.
 - **Not downloadable:** self-destructing media, and anything while the account
   is not online (`get-telegram-status`).
 

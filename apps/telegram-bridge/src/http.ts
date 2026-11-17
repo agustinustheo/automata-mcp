@@ -39,7 +39,8 @@ interface Route {
    * unauthenticated caller learns nothing about the configuration from it.
    */
   needsTelegram?: boolean
-  handle: (request: { id: string, body: unknown, query: URLSearchParams }) => Promise<Reply>
+  /** `signal` aborts when the caller disconnects before the answer is written. */
+  handle: (request: { id: string, body: unknown, query: URLSearchParams, signal: AbortSignal }) => Promise<Reply>
 }
 
 const createBody = z.object({
@@ -175,9 +176,9 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
     },
     {
       label: 'GET /sessions/:id/media', method: 'GET', pattern: /^\/sessions\/([^/]+)\/media$/, access: 'session', needsTelegram: true,
-      handle: async ({ id, query }) => {
+      handle: async ({ id, query, signal }) => {
         const { chatId, messageId, maxBytes } = parse(mediaQuery, Object.fromEntries(query))
-        return { status: 200, body: await manager.media(id, chatId, messageId, maxBytes) }
+        return { status: 200, body: await manager.media(id, chatId, messageId, maxBytes, signal) }
       },
     },
   ]
@@ -221,7 +222,10 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       }
 
       const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : undefined
-      send(res, await route.handle({ id, body, query: url.searchParams }))
+      // Lets a long route (media) stop work nobody is waiting for any more.
+      const gone = new AbortController()
+      res.once('close', () => { if (!res.writableEnded) gone.abort() })
+      send(res, await route.handle({ id, body, query: url.searchParams, signal: gone.signal }))
     }
     catch (error) {
       if (error instanceof HttpError) {

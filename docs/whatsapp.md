@@ -601,17 +601,22 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   the message is looked up **inside** that chat (Evolution's own media route
   finds any message of the account by id alone).
 - **Never stored.** Each call downloads the file through Evolution's
-  `/chat/getBase64FromMediaMessage` and hands it straight back.
+  `/chat/getBase64FromMediaMessage` and hands it straight back. Evolution's
+  answer is read with a byte cap, so a file larger than its sender claimed is
+  cut off rather than buffered, and at most three downloads run at once per web
+  process (more answer 429).
 - **Small files inline, larger ones by link.** Up to `NUXT_MEDIA_INLINE_MAX_BYTES`
   (5 MiB) the file is in the tool result — images as images, anything else as an
   embedded file. Up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) the tool returns a `url`
   under `/mcp-media/` instead: signed, valid ten minutes, and followed only with
   the **same** connector token in the `Authorization` header, after the same
   scope checks run again. It holds no bytes; following it downloads the file
-  then. Larger files are refused with their size. Signing needs
-  `NUXT_WEBHOOK_SECRET` and `NUXT_PUBLIC_APP_URL`; without them only inline
-  delivery works. Behind a proxy that only forwards `/mcp`, forward
-  `/mcp-media/` too.
+  then. Larger files are refused with their size. The link needs a client that can send that header: one that puts the token in
+  the URL path (`/mcp/<token>`) cannot follow it and should ask for
+  `delivery: "inline"`. Links need `NUXT_PUBLIC_APP_URL`; they are sealed with
+  `NUXT_MEDIA_URL_SECRET`, or a random key per process when it is unset (links
+  then end on restart; set it for several replicas). Behind a proxy that only
+  forwards `/mcp`, forward `/mcp-media/` too.
 - **Costly.** Each call and each followed link counts against the
   per-connection budget for costly tools (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`).
 - **Not downloadable:** view-once media, and old media WhatsApp no longer holds —
