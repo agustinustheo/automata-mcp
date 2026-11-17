@@ -160,11 +160,13 @@ export function signedUrlUnavailable(size: number | undefined, inlineMax: number
 let inFlight = 0
 
 /**
- * Run one download in one of this process's few media slots, or refuse with
- * 429. Each download holds a file several times over while it is decoded, so the
- * number in flight is what bounds memory, whatever the per-minute budgets allow.
+ * Take one of this process's few media slots, or refuse with 429; the caller
+ * must call the returned release exactly once. A buffered download holds a file
+ * several times over while it is decoded, and a streamed one holds a source
+ * connection, so the number in flight is what bounds both, whatever the
+ * per-minute budgets allow.
  */
-export async function withMediaSlot<T>(work: () => Promise<T>): Promise<T> {
+export function acquireMediaSlot(): () => void {
   if (inFlight >= MEDIA_DOWNLOADS_IN_FLIGHT) {
     throw createError({
       statusCode: 429,
@@ -172,12 +174,108 @@ export async function withMediaSlot<T>(work: () => Promise<T>): Promise<T> {
     })
   }
   inFlight++
+  let released = false
+  return () => {
+    if (!released) {
+      released = true
+      inFlight--
+    }
+  }
+}
+
+/** Run one download in a media slot, released when it settles. */
+export async function withMediaSlot<T>(work: () => Promise<T>): Promise<T> {
+  const release = acquireMediaSlot()
   try {
     return await work()
   }
   finally {
-    inFlight--
+    release()
   }
+}
+
+/**
+ * Open a raw byte answer as a stream, without reading it. An error answer is
+ * read up to 64 KiB and thrown as `MediaFetchError` (status and parsed body),
+ * like `fetchCappedJson`'s.
+ */
+export async function openMediaStream(
+  client: typeof $fetch,
+  url: string,
+  options: Record<string, unknown>,
+): Promise<{ headers: Headers, body: ReadableStream<Uint8Array> }> {
+  const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
+  const stream = response._data as ReadableStream<Uint8Array> | undefined
+  if (!response.ok) {
+    const text = stream ? (await readCapped(stream, 64 * 1024)).text : ''
+    throw new MediaFetchError(response.status, safeJson(text))
+  }
+  if (!stream) throw new MediaFetchError(502, undefined)
+  return { headers: response.headers, body: stream }
+}
+
+/** A whole stream as one Buffer, refused with 413 the moment it passes `maxBytes`. For inline results only. */
+export async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<Buffer> {
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => {})
+      throw createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxBytes)} this connector fetches.` })
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
+ * Pass a stream through unchanged, chunk by chunk, counting bytes: past
+ * `maxBytes` it errors (the response ends early and the client sees a broken
+ * download, never a short file passed off as whole). `done` runs exactly once,
+ * however the stream ends — finished, cut off, or cancelled by the client.
+ */
+export function cappedPassThrough(
+  source: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  done: (ok: boolean) => void,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader()
+  let size = 0
+  let settled = false
+  const finish = (ok: boolean) => {
+    if (!settled) {
+      settled = true
+      done(ok)
+    }
+  }
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done: end, value } = await reader.read()
+        if (end) {
+          controller.close()
+          finish(true)
+          return
+        }
+        size += value.byteLength
+        if (size > maxBytes) throw new Error(`media stream passed ${maxBytes} bytes`)
+        controller.enqueue(value)
+      }
+      catch (error) {
+        await reader.cancel().catch(() => {})
+        controller.error(error)
+        finish(false)
+      }
+    },
+    async cancel() {
+      await reader.cancel().catch(() => {})
+      finish(false)
+    },
+  })
 }
 
 /**
@@ -197,44 +295,52 @@ export class MediaFetchError extends Error {
 }
 
 /**
- * GET or POST through an ofetch client and parse the JSON answer, never reading
- * more than `maxBodyBytes` of it: the count stops the stream before anything is
- * parsed, so an oversized answer costs at most the cap, not its own size. An
- * error answer is read up to 64 KiB and thrown as `MediaFetchError`, carrying
- * the status and parsed body the callers' error mapping expects.
+ * GET or POST through an ofetch client and parse the JSON answer that carries
+ * one file of at most `maxFileBytes`, never reading more than that file's
+ * base64 plus room for the fields around it (`cappedBodyBytes`): the count
+ * stops the stream before anything is parsed, so an oversized answer costs at
+ * most the cap, not its own size, and is refused with 413.
+ *
+ * An error answer is read up to 64 KiB and the rest dropped — a long error page
+ * is still an error, not an oversized file — then thrown as `MediaFetchError`,
+ * carrying the status and parsed body the callers' error mapping expects.
  */
 export async function fetchCappedJson<T>(
   client: typeof $fetch,
   url: string,
   options: Record<string, unknown>,
-  maxBodyBytes: number,
+  maxFileBytes: number,
 ): Promise<T> {
   const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
   const stream = response._data as ReadableStream<Uint8Array> | undefined
-  const limit = response.ok ? maxBodyBytes : 64 * 1024
-  const text = stream ? await readCapped(stream, limit) : ''
-  if (!response.ok) throw new MediaFetchError(response.status, safeJson(text))
-  return JSON.parse(text) as T
+  if (!response.ok) {
+    const text = stream ? (await readCapped(stream, 64 * 1024)).text : ''
+    throw new MediaFetchError(response.status, safeJson(text))
+  }
+  const body = stream ? await readCapped(stream, cappedBodyBytes(maxFileBytes)) : { text: '', truncated: false }
+  if (body.truncated) {
+    throw createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxFileBytes)} this connector fetches.` })
+  }
+  return JSON.parse(body.text) as T
 }
 
-async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Promise<string> {
+/** At most `limit` bytes of a stream as text; past it, the stream is cancelled and `truncated` set. */
+async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Promise<{ text: string, truncated: boolean }> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
-    size += value.byteLength
-    if (size > limit) {
+    if (size + value.byteLength > limit) {
+      chunks.push(value.subarray(0, limit - size))
       await reader.cancel().catch(() => {})
-      throw createError({
-        statusCode: 413,
-        message: `This file is larger than the ${formatBytes(Math.floor((limit - 256 * 1024) * 3 / 4))} this connector fetches.`,
-      })
+      return { text: Buffer.concat(chunks).toString('utf8'), truncated: true }
     }
+    size += value.byteLength
     chunks.push(value)
   }
-  return Buffer.concat(chunks).toString('utf8')
+  return { text: Buffer.concat(chunks).toString('utf8'), truncated: false }
 }
 
 function safeJson(text: string): unknown {

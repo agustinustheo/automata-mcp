@@ -26,6 +26,12 @@ type Access = 'public' | 'admin' | 'session'
 interface Reply {
   status: number
   body?: unknown
+  /**
+   * A raw byte answer, written chunk by chunk as it is produced and never held
+   * whole (media). Errors before the first chunk still answer as JSON; one after
+   * it can only end the connection, which the caller reads as a broken download.
+   */
+  stream?: { headers: Record<string, string>, chunks: AsyncIterable<Buffer> }
 }
 
 interface Route {
@@ -178,7 +184,7 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       label: 'GET /sessions/:id/media', method: 'GET', pattern: /^\/sessions\/([^/]+)\/media$/, access: 'session', needsTelegram: true,
       handle: async ({ id, query, signal }) => {
         const { chatId, messageId, maxBytes } = parse(mediaQuery, Object.fromEntries(query))
-        return { status: 200, body: await manager.media(id, chatId, messageId, maxBytes, signal) }
+        return { status: 200, stream: await manager.media(id, chatId, messageId, maxBytes, signal) }
       },
     },
   ]
@@ -225,11 +231,13 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       // Lets a long route (media) stop work nobody is waiting for any more.
       const gone = new AbortController()
       res.once('close', () => { if (!res.writableEnded) gone.abort() })
-      send(res, await route.handle({ id, body, query: url.searchParams, signal: gone.signal }))
+      const reply = await route.handle({ id, body, query: url.searchParams, signal: gone.signal })
+      if (reply.stream) await sendStream(res, reply.status, reply.stream)
+      else send(res, reply)
     }
     catch (error) {
       if (error instanceof HttpError) {
-        return send(res, { status: error.status, body: { error: error.message, ...(error.code && { code: error.code }) } })
+        return send(res, { status: error.status, body: { ...error.details, error: error.message, ...(error.code && { code: error.code }) } })
       }
       console.error(`[http] ${route.label} failed: ${describeError(error)}`)
       send(res, { status: 500, body: { error: 'Internal error.' } })
@@ -285,6 +293,31 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   if (result.success) return result.data
   const detail = result.error.issues.map(issue => `${issue.path.join('.') || 'body'}: ${issue.message}`).join('; ')
   throw new HttpError(400, detail)
+}
+
+/**
+ * Write a streamed answer, waiting for the socket to drain between chunks so a
+ * slow reader is never answered by buffering. The first chunk is pulled before
+ * the headers are written, so a failure to start still answers as JSON.
+ */
+async function sendStream(res: ServerResponse, status: number, stream: NonNullable<Reply['stream']>): Promise<void> {
+  const iterator = stream.chunks[Symbol.asyncIterator]()
+  const first = await iterator.next()
+  res.writeHead(status, { ...stream.headers, 'cache-control': 'no-store' })
+  try {
+    for (let step = first; !step.done; step = await iterator.next()) {
+      if (res.destroyed) break
+      if (!res.write(step.value)) await new Promise<void>(resolve => res.once('drain', resolve))
+    }
+    res.end()
+  }
+  catch (error) {
+    console.error(`[http] stream ended early: ${describeError(error)}`)
+    res.destroy()
+  }
+  finally {
+    await iterator.return?.().catch(() => {})
+  }
 }
 
 function send(res: ServerResponse, reply: Reply): void {

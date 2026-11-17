@@ -161,16 +161,6 @@ export type BridgeResolved = {
   known: boolean
 }
 
-/** One file downloaded by the bridge (`GET /sessions/:id/media`). */
-export type BridgeMedia = {
-  mediaType: string
-  mimeType: string
-  fileName?: string
-  size: number
-  /** base64 */
-  data: string
-}
-
 const BRIDGE_MEDIA_DEADLINE_MS = 90_000
 
 export type BridgeSent = {
@@ -233,11 +223,13 @@ export function createTelegramBridge(creds: TelegramCredentials) {
     send: (chatId: string, text: string) => client<BridgeSent>(`${session}/send`, { method: 'POST', body: { chatId, text } }),
     // A whole file, base64, in one answer: the deadline covers the download
     // from Telegram as well as the body. See telegram-media.ts.
-    // Read through fetchCappedJson: never more than one file of `maxBytes`, base64.
-    media: (chatId: string, messageId: number, maxBytes: number) => fetchCappedJson<BridgeMedia>(client, `${session}/media`, {
+    // The file as a byte stream, never read here: callers pipe it or read it
+    // capped (telegram-media.ts). Metadata comes in the bridge's x-media-* headers.
+    media: (chatId: string, messageId: number, maxBytes: number, signal?: AbortSignal) => openMediaStream(client, `${session}/media`, {
       query: { chatId, messageId, maxBytes },
       timeout: BRIDGE_MEDIA_DEADLINE_MS,
-    }, cappedBodyBytes(maxBytes)),
+      ...(signal && { signal }),
+    }),
     webhook: (url: string, headers: Record<string, string>) => client(`${session}/webhook`, { method: 'PUT', body: { url, headers } }),
   }
 }

@@ -60,6 +60,13 @@ export default defineKindTool({
     }
     catch (error) {
       if (httpStatusOf(error) !== 413) throw error
+      const size = (error as { data?: { size?: unknown } }).data?.size
+      if (typeof size === 'number' && size > mediaMaxBytes()) {
+        throw createError({
+          statusCode: 413,
+          message: `This file is ${formatBytes(size)}, larger than the ${formatBytes(mediaMaxBytes())} this connector fetches.`,
+        })
+      }
       if (delivery === 'inline') {
         throw createError({
           statusCode: 413,

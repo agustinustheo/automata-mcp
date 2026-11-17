@@ -164,8 +164,12 @@ and message `id`, through the bridge's `GET /sessions/:id/media`.
   bridge fetches the message through that chat and refuses one that belongs to
   another — private chats and basic groups share one message-id counter per
   account, so an id alone could name a message elsewhere.
-- **Never stored.** The bridge downloads into memory and answers with the bytes;
-  nothing is written to disk or to the `telegram` schema.
+- **Streamed, never stored.** The bridge downloads the file from Telegram in
+  chunks (`iterDownload`) and sends each chunk on as it arrives, as raw bytes;
+  nothing is written to disk or to the `telegram` schema. A download link pipes
+  that stream straight to the caller, so no layer holds the whole file. Only an
+  inline tool result is read into memory, capped at the inline limit, because
+  MCP carries the file inside the result.
 - **Sizes.** Same as WhatsApp: up to `NUXT_MEDIA_INLINE_MAX_BYTES` (5 MiB) inline,
   up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) as a 10-minute signed `/mcp-media/` link
   that only the same token can follow. The bridge also refuses anything over

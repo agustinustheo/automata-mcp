@@ -1163,6 +1163,30 @@ const CHAT_TS_INDEX: MessageIndexSpec = {
   reported: new Set<string>(),
 }
 
+const KEY_ID_INDEX: MessageIndexSpec = {
+  // Up to the second column, so trailing columns count too.
+  shape: '%USING btree ("instanceId", ((key ->> \'id\'::text))%',
+  partial: false,
+  label: '[media]',
+  fallback: 'refusing media downloads on Evolution servers that find media by id alone',
+  missing: '"Message" has no index on ("instanceId", (key->>\'id\')), so download-media cannot check '
+    + 'cheaply that a message id is unique to the token\'s chats and refuses on Evolution servers that '
+    + 'reload media by id alone (evolution-api-reforged). Create message_instance_key_id_idx: see '
+    + 'docs/whatsapp.md "Indexes on Evolution\'s tables".',
+  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
+  reported: new Set<string>(),
+}
+
+/**
+ * Whether this message database has an index on ("instanceId", key->>'id'),
+ * which makes `messageIdOutsideChats` an index probe instead of a scan of the
+ * account. Same detection as the chat index: by shape, cached ten minutes.
+ */
+export async function messageKeyIdIndexPresent(instance: AppInstance): Promise<boolean> {
+  const { query } = await evolutionDbFor(instance)
+  return await messageIndexPresent(instance, query, KEY_ID_INDEX)
+}
+
 const INSTANCE_TS_INDEX: MessageIndexSpec = {
   // Up to the second column, so `DESC` and trailing columns count too.
   shape: '%USING btree ("instanceId", "messageTimestamp"%',
@@ -1382,7 +1406,9 @@ export async function findMessageInChats(
  * per chat, not per id). When the same id sits in a chat the token cannot
  * read, which copy Evolution downloads is not ours to decide, so the download
  * is refused. Answers a boolean only: nothing about the other chat is read.
- * Costs what Evolution's own lookup by id costs.
+ *
+ * Only call it with `messageKeyIdIndexPresent` true: without that index this is
+ * a scan of every message the account holds.
  */
 export async function messageIdOutsideChats(
   instance: AppInstance,

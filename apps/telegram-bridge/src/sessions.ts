@@ -648,50 +648,92 @@ export class SessionManager {
   }
 
   /**
-   * Download the file one message carries, into memory, and hand it back.
-   * Nothing is written to disk or to the database.
+   * Stream the file one message carries, chunk by chunk, straight to the caller.
+   * Nothing is written to disk or to the database, and the file is never held
+   * whole: only the chunk in flight is in memory.
    *
    * The message is fetched **through the chat** and then checked to belong to
    * it: private chats and basic groups share one message-id counter per
    * account, so an id alone could name a message in another chat. A file over
-   * `maxBytes` is refused from its reported size before downloading, and again
-   * on the bytes.
+   * `maxBytes` is refused from its reported size before anything is sent (413,
+   * with the size), and cut off if the bytes pass it anyway.
+   *
+   * One signal bounds the whole operation from entry: the caller disconnecting
+   * (already, or later), the deadline, or the cap. The download slot is held
+   * until the stream ends or is cut off.
    */
   async media(id: string, chatId: string, messageId: number, maxBytes: number, signal: AbortSignal): Promise<{
-    mediaType: MediaInfo['mediaType']
-    mimeType: string
-    fileName?: string
-    size: number
-    data: string
+    headers: Record<string, string>
+    chunks: AsyncIterable<Buffer>
   }> {
-    // A file is held in memory several times over while it is encoded, in a
+    // A download holds a Telegram connection's attention for its duration, in a
     // process every linked account shares: a few at a time, the rest refused.
     if (this.mediaInFlight >= MEDIA_DOWNLOADS_IN_FLIGHT) {
       throw new HttpError(429, 'Too many file downloads are in progress on the bridge. Try again in a few seconds.')
     }
     this.mediaInFlight++
+    let handedOff = false
     try {
-      return await this.downloadOne(id, chatId, messageId, maxBytes, signal)
+      const overCap = new AbortController()
+      const stop = AbortSignal.any([signal, AbortSignal.timeout(MEDIA_DOWNLOAD_DEADLINE_MS), overCap.signal])
+      const stopped = () => overCap.signal.aborted
+        ? new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
+        : new HttpError(504, 'Downloading the file from Telegram took too long, or the caller went away.')
+      const { client, message, info } = await this.locateMedia(id, chatId, messageId, maxBytes, stop, stopped)
+
+      const headers: Record<string, string> = {
+        'content-type': info.mimeType,
+        'x-media-type': info.mediaType,
+        ...(info.fileName && { 'x-media-file-name': encodeURIComponent(info.fileName) }),
+        ...(info.size !== undefined && { 'x-media-size': String(info.size) }),
+      }
+      const release = () => { this.mediaInFlight-- }
+      const chunks = (async function* () {
+        let sent = 0
+        try {
+          for await (const chunk of client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })) {
+            sent += chunk.length
+            if (sent > maxBytes) {
+              overCap.abort()
+              throw stopped()
+            }
+            yield chunk
+          }
+        }
+        catch (error) {
+          if (stop.aborted) throw stopped()
+          throw error instanceof HttpError ? error : toHttpError(error)
+        }
+        finally {
+          release()
+        }
+      })()
+      handedOff = true
+      return { headers, chunks }
     }
     finally {
-      this.mediaInFlight--
+      if (!handedOff) this.mediaInFlight--
     }
   }
 
-  private async downloadOne(id: string, chatId: string, messageId: number, maxBytes: number, signal: AbortSignal): Promise<{
-    mediaType: MediaInfo['mediaType']
-    mimeType: string
-    fileName?: string
-    size: number
-    data: string
-  }> {
-    await this.row(id)
+  /** The message and its media, found through the chat, every await bounded by `stop`. */
+  private async locateMedia(
+    id: string,
+    chatId: string,
+    messageId: number,
+    maxBytes: number,
+    stop: AbortSignal,
+    stopped: () => Error,
+  ): Promise<{ client: TelegramClient, message: Api.Message, info: MediaInfo }> {
+    const bounded = <T>(work: Promise<T>): Promise<T> => untilAborted(work, stop, stopped)
+
+    await bounded(this.row(id))
     const rt = this.runtime(id)
     const client = this.connectedClient(rt)
     const store = new SyncStore(this.sql, id)
 
-    const chat = await store.chat(chatId)
-    const accessHash = chat?.access_hash ?? (BigInt(chatId) > 0n ? await store.userAccessHash(chatId) : null)
+    const chat = await bounded(store.chat(chatId))
+    const accessHash = chat?.access_hash ?? (BigInt(chatId) > 0n ? await bounded(store.userAccessHash(chatId)) : null)
     const peer = chat || accessHash ? inputPeerFor(chatId, accessHash) : undefined
     if (!peer) {
       throw new HttpError(404, 'This chat is not known to the bridge. List chats first.')
@@ -699,10 +741,11 @@ export class SessionManager {
 
     let message: Api.Message | undefined
     try {
-      const [found] = await client.getMessages(peer, { ids: [messageId] })
+      const [found] = await bounded(client.getMessages(peer, { ids: [messageId] }))
       message = found instanceof Api.Message ? found : undefined
     }
     catch (error) {
+      if (error instanceof HttpError) throw error
       throw toHttpError(error)
     }
     if (!message || markedId(message.peerId) !== chatId) {
@@ -714,49 +757,10 @@ export class SessionManager {
       throw new HttpError(422, 'This message carries no downloadable file (self-destructing media is not downloadable).')
     }
     if (info.size !== undefined && info.size > maxBytes) {
-      throw new HttpError(413, `This file is ${formatBytes(info.size)}, over the ${formatBytes(maxBytes)} this connector fetches.`)
+      throw new HttpError(413, `This file is ${formatBytes(info.size)}, over the ${formatBytes(maxBytes)} this connector fetches.`, undefined, { size: info.size })
     }
-
-    // Stopped by whichever comes first: the caller disconnecting, the deadline,
-    // or the bytes passing the cap (a reported size is Telegram's, not a promise).
-    const stop = new AbortController()
-    const timer = setTimeout(() => stop.abort(), MEDIA_DOWNLOAD_DEADLINE_MS)
-    const onGone = () => stop.abort()
-    signal.addEventListener('abort', onGone, { once: true })
-    let overCap = false
-    let data: string | Buffer | undefined
-    try {
-      data = await client.downloadMedia(message, {
-        signal: stop.signal,
-        progressCallback: (downloaded) => {
-          if (Number(downloaded.toString()) > maxBytes) {
-            overCap = true
-            stop.abort()
-          }
-        },
-      })
-    }
-    catch (error) {
-      if (overCap) throw new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
-      if (stop.signal.aborted) throw new HttpError(504, 'Downloading the file from Telegram took too long.')
-      throw toHttpError(error)
-    }
-    finally {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', onGone)
-    }
-    if (!Buffer.isBuffer(data)) throw new HttpError(502, 'Telegram returned no file for this message.')
-    if (data.length > maxBytes) {
-      throw new HttpError(413, `This file is ${formatBytes(data.length)}, over the ${formatBytes(maxBytes)} this connector fetches.`)
-    }
-
-    return {
-      mediaType: info.mediaType,
-      mimeType: info.mimeType,
-      ...(info.fileName && { fileName: info.fileName }),
-      size: data.length,
-      data: data.toString('base64'),
-    }
+    if (stop.aborted) throw stopped()
+    return { client, message, info }
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
@@ -1348,15 +1352,31 @@ function parseResolveQuery(query: string): { username: string } | { phone: strin
 }
 
 /**
- * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood
- * wait, 404 for "no such user", 422 for any other refusal, carrying Telegram's
- * code. Anything that is not an RPC error is rethrown and becomes a 500.
+ * `work`, or the error `stopped()` makes as soon as `signal` aborts — including
+ * when it already has. The work itself runs on; this only stops waiting for it.
  */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal, stopped: () => Error): Promise<T> {
+  if (signal.aborted) return Promise.reject(stopped())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(stopped())
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value) },
+      (error) => { signal.removeEventListener('abort', onAbort); reject(error) },
+    )
+  })
+}
+
 /** Media downloads one bridge runs at once. */
 const MEDIA_DOWNLOADS_IN_FLIGHT = 2
 /** One download's deadline, whatever the app's own is. */
 const MEDIA_DOWNLOAD_DEADLINE_MS = 120_000
 
+/**
+ * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood
+ * wait, 404 for "no such user", 422 for any other refusal, carrying Telegram's
+ * code. Anything that is not an RPC error is rethrown and becomes a 500.
+ */
 function toHttpError(error: unknown): HttpError {
   const code = describeError(error)
   if (/^FLOOD_(PREMIUM_)?WAIT/.test(code)) {
