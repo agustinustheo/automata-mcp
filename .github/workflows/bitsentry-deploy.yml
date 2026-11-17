@@ -1,7 +1,7 @@
 # BitSentry fork only (lives on bitsentry/build, never on main or a contribution branch).
 #
 # A release tag v<upstream>-bitsentry.N on bitsentry/build:
-#   1. build  (GitHub-hosted)  web + telegram-bridge images, pushed to private GHCR
+#   1. build  (GitHub-hosted)  web + telegram-bridge images, pushed to GHCR (public packages)
 #                              packages tagged <release> and sha-<commit>
 #   2. deploy (self-hosted on bitsentry-mcp) pull those tags with this job's own
 #                              read-only package token, back up, compose up, health

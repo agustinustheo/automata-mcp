@@ -51,13 +51,14 @@ services:
 
   redis:
     mem_limit: 128m
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru"]
+    # noeviction, not allkeys-lru: evolution-api-reforged keeps its durable event queue
+    # in Redis streams, and an evicted stream is a lost WhatsApp event. Full = writes
+    # fail loudly instead.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "noeviction"]
 
   evolution:
-    # Pinned to stock Evolution 2.3.7 (upstream main moved to evolution-api-reforged 3.1.0,
-    # which rewrites "Message" on first start). Upstream supports the app on stock 2.3.7.
-    # Switching engines is a separate, deliberate decision; see deploy/bitsentry/README.md.
-    image: evoapicloud/evolution-api:v2.3.7
+    # Image: upstream's own pin (evolution-api-reforged, by digest, in docker-compose.yml),
+    # so the engine moves with upstream. See deploy/bitsentry/README.md "Evolution engine".
     depends_on: !override
       redis:
         condition: service_healthy

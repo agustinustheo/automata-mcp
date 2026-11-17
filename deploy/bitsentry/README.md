@@ -23,7 +23,7 @@ Tags `v<upstream package.json version>-bitsentry.<N>` on `bitsentry/build`, e.g.
 `.github/workflows/bitsentry-deploy.yml`:
 
 1. **build** on GitHub-hosted runners: `apps/web/Dockerfile` and
-   `apps/telegram-bridge/Dockerfile`, pushed to private GHCR packages
+   `apps/telegram-bridge/Dockerfile`, pushed to GHCR packages
    `ghcr.io/agustinustheo/automata-mcp-web` and
    `ghcr.io/agustinustheo/automata-mcp-telegram-bridge`, each tagged `<release>`
    and `sha-<12-char commit>` (plus a `buildcache` tag for layer reuse).
@@ -85,18 +85,35 @@ workflow, on `bitsentry/build` or a release tag, from push / release / manual
 events. Pull-request jobs are refused before any step runs, and fork pull requests
 need approval to run workflows at all. Builds and the sync never run on it.
 
+The packages are **public**, by decision (Theo, 2026-11-17): the fork is public and
+its images hold only what the public source builds — no secrets, no `.env`; keeping
+them public keeps builds on GitHub's free runners simple. The deploy job still logs
+in with its read-only `GITHUB_TOKEN`, which is harmless for public packages and
+keeps working if they are ever made private.
+
 ## Evolution engine
 
-Upstream `main` runs `evolution-api-reforged` 3.1.0. This build pins stock
-`evoapicloud/evolution-api:v2.3.7` (in `docker-compose.override.yml`), which upstream
-still supports, because the fork rewrites `"Message"` (dedupe + unique index) on its
-first start. Switching is a separate decision: follow upstream's
-`docs/whatsapp.md` "Moving from stock Evolution 2.3.7", then remove the pin.
+This build runs the Evolution image **upstream pins** (`evolution-api-reforged`,
+by digest, in upstream's `docker-compose.yml`): the override sets no `image:` for
+`evolution`, so a sync that moves upstream's pin moves ours at the next release.
+Switched from stock `evoapicloud/evolution-api:v2.3.7` on 2026-11-17 (Theo: run the
+most stable engine, upstream's if possible). Reforged fixes stock's dead offline
+queue, the 50-minute status-stanza drops and unrecorded retried closes; see
+upstream `docs/whatsapp.md` "Which Evolution".
+
+- Its first start dedupes `"Message"` and adds `Message_instanceId_key_unique`
+  (seconds on our ~22k rows; a big table needs upstream's pre-build steps first).
+- It needs a custom `AUTHENTICATION_API_KEY` (ours: 64 chars), `CACHE_REDIS_ENABLED`
+  and a persistent Redis (`--appendonly yes`, `noeviction` here).
+- `message_instance_key_id_idx` exists on `"Message"` (created 2026-11-17), which
+  media downloads need on reforged (501 without it).
+- Rolling back = pin `image: evoapicloud/evolution-api:v2.3.7` here again and
+  release; upstream rehearsed stock on the migrated schema (fork #33).
 
 ## Reusing this for the Odoo MCP fork
 
 Same layout: mirror `main`, `feature/*` for contributions, a build branch with
 `deploy/bitsentry/` and the two workflows; images built on GitHub-hosted runners into
-private GHCR; a second runner (or the same one with its own labels and a guard entry)
+GHCR; a second runner (or the same one with its own labels and a guard entry)
 that only pulls and deploys, with its own `APP_DIR`, images, DB step and health probes
 in `deploy.sh`.
