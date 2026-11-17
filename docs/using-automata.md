@@ -27,10 +27,15 @@
    [Email (IMAP) connections](imap.md)).
 4. On the connection's dashboard, press **New token**: a name, an
    expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
-5. Add it to Claude. The **How to connect** dialog has the steps for Claude.ai
-   (Settings → Customize → Connectors → Add → Add custom connector), Claude Code
-   (`claude mcp add --transport http <name> <url>`), clients that send an
-   `Authorization: Bearer` header, and the MCP Inspector.
+5. Add it to your AI assistant. The dialog shown when a token is created, and
+   the **How to connect** dialog, have a tab per assistant: **Claude** (Claude.ai
+   and Desktop: Settings → Customize → Connectors → Add → Add custom connector;
+   Claude Code: `claude mcp add --transport http <name> <url>`), **Grok Bot** and
+   **Meta Muse** (asked in a chat; the token goes into their secure key prompt,
+   sent as `Authorization: Bearer`), **ChatGPT** (Plugins → Add custom MCP
+   server, the token URL, No authentication), and **Other** (token URL,
+   `Authorization: Bearer` header, the MCP Inspector). The browser remembers
+   the last tab picked, so the next token opens on it.
    **Cursor** (hosted server only): install the Automata plugin from
    [cursor.directory](https://cursor.directory), or add this repository's
    `mcp.json` entry to your own. It sends the token from the `AUTOMATA_TOKEN`
