@@ -764,27 +764,56 @@ export class SessionManager {
 
   /**
    * Keep a place in the download limit for a request nobody waits for any more,
-   * until it settles — never released on a timer, which would let repeated
-   * cancels pile up live requests. It does settle: teleproto ends every pending
-   * request with Telegram's answer, or, when the connection drops, rejects it
-   * (reconnect failed) or sends it again (reconnected) to be answered then. One
-   * still pending after `MEDIA_ABANDONED_WARN_MS` is logged, so a request
-   * Telegram leaves unanswered on a live connection is seen, not guessed at.
-   * The account's own place is kept too, so cancelling cannot let one account
-   * hold every slot.
+   * until it settles — so repeated cancels cannot pile up live requests. It
+   * normally does: teleproto ends every pending request with Telegram's answer,
+   * or, when the connection drops, rejects it (reconnect failed) or sends it
+   * again (reconnected) to be answered then. The account's own place is kept
+   * too, so cancelling cannot let one account hold every slot.
+   *
+   * A request Telegram leaves unanswered on a connection that stays up would
+   * hold its place for ever, so it gets a hard ceiling:
+   * - logged after `MEDIA_ABANDONED_WARN_MS`;
+   * - after `MEDIA_ABANDONED_CEILING_MS`, the session is reconnected if it still
+   *   runs the client the request was made on. Dropping that client is what
+   *   ends its pending requests (teleproto rejects them on disconnect), so the
+   *   place comes back with the request actually gone;
+   * - if even that has not settled it `MEDIA_ABANDONED_BACKSTOP_MS` later, the
+   *   place is given back anyway, logged as an error: at most one such request
+   *   per bridge slot per ceiling period, never an unbounded pile.
    */
   private holdAbandoned(sessionId: string, work: Promise<unknown>): void {
     this.mediaAbandoned++
     this.mediaBySession.set(sessionId, (this.mediaBySession.get(sessionId) ?? 0) + 1)
-    const warn = setTimeout(() => {
-      console.warn(`[media] an abandoned Telegram download request has been pending for ${MEDIA_ABANDONED_WARN_MS / 1000}s; it keeps its place in the download limit until it settles`)
-    }, MEDIA_ABANDONED_WARN_MS)
-    warn.unref?.()
+    const client = this.runtimes.get(sessionId)?.client
+    const timers: NodeJS.Timeout[] = []
+    const after = (ms: number, run: () => void) => {
+      const timer = setTimeout(run, ms)
+      timer.unref?.()
+      timers.push(timer)
+    }
+    let held = true
     const free = () => {
-      clearTimeout(warn)
+      if (!held) return
+      held = false
+      for (const timer of timers) clearTimeout(timer)
       this.mediaAbandoned--
       this.leaveSession(sessionId)
     }
+    after(MEDIA_ABANDONED_WARN_MS, () => {
+      console.warn(`[media] ${sessionId}: an abandoned Telegram download request has been pending for ${MEDIA_ABANDONED_WARN_MS / 1000}s; it keeps its place in the download limit until it settles`)
+    })
+    after(MEDIA_ABANDONED_CEILING_MS, () => {
+      const rt = this.runtimes.get(sessionId)
+      if (client && rt?.client === client) {
+        console.error(`[media] ${sessionId}: an abandoned Telegram download request is still unanswered after ${MEDIA_ABANDONED_CEILING_MS / 60_000} min; reconnecting the session to end it`)
+        this.reconnect(sessionId).catch(error => console.error(`[media] ${sessionId}: reconnect to end an unanswered download request failed: ${describeError(error)}`))
+      }
+      after(MEDIA_ABANDONED_BACKSTOP_MS, () => {
+        if (!held) return
+        console.error(`[media] ${sessionId}: an abandoned Telegram download request never settled; giving its place in the download limit back`)
+        free()
+      })
+    })
     work.then(free, free)
   }
 
@@ -1469,6 +1498,10 @@ const MEDIA_DOWNLOADS_PER_SESSION = 1
 const MEDIA_DOWNLOAD_DEADLINE_MS = 120_000
 /** When an abandoned Telegram request still pending is logged. */
 const MEDIA_ABANDONED_WARN_MS = 120_000
+/** When the session is reconnected to end an abandoned request Telegram never answered. */
+const MEDIA_ABANDONED_CEILING_MS = 10 * 60_000
+/** How long after that reconnect its place is given back regardless. */
+const MEDIA_ABANDONED_BACKSTOP_MS = 60_000
 
 /**
  * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood

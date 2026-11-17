@@ -24,8 +24,8 @@ import { assertNever } from '#shared/connection'
  *
  * **Memory is bounded before bytes are held.** A sender's reported size is a
  * claim, so Evolution's answer (one JSON body with the whole file as base64) is
- * read through `fetchCappedJson`, which stops counting bytes at the cap rather
- * than parsing whatever arrives; the bridge's answer is a byte stream, piped
+ * read through `fetchBase64Media`, which decodes the file as it streams and
+ * stops at the cap rather than parsing whatever arrives; the bridge's answer is a byte stream, piped
  * through (`pipeMediaToResponse`) or read capped for an inline result
  * (`readStreamCapped`). At most `MEDIA_DOWNLOADS_IN_FLIGHT` downloads run at
  * once in this process, one per connection (`acquireMediaSlot`), each slot held
@@ -240,7 +240,7 @@ export async function withMediaSlot<T>(connectionId: string, work: () => Promise
 /**
  * Open a raw byte answer as a stream, without reading it. An error answer is
  * read up to 64 KiB and thrown as `MediaFetchError` (status and parsed body),
- * like `fetchCappedJson`'s.
+ * like `fetchBase64Media`'s.
  */
 export async function openMediaStream(
   client: typeof $fetch,
@@ -418,33 +418,65 @@ export class MediaFetchError extends Error {
 }
 
 /**
- * GET or POST through an ofetch client and parse the JSON answer that carries
- * one file of at most `maxFileBytes`, never reading more than that file's
- * base64 plus room for the fields around it (`cappedBodyBytes`): the count
- * stops the stream before anything is parsed, so an oversized answer costs at
- * most the cap, not its own size, and is refused with 413.
+ * GET or POST through an ofetch client and read the JSON answer that carries
+ * one file of at most `maxFileBytes` as a base64 field named `field`, decoding
+ * that field **as it streams** (`Base64FieldReader`): the file is held once,
+ * decoded, never also as the answer's bytes, its text and its base64 string.
+ * Answers the rest of the object, parsed, and the file (undefined when the
+ * field is absent).
+ *
+ * Bounded before bytes are held: an answer longer than the file's base64 plus
+ * room for the fields around it (`cappedBodyBytes`) — by its Content-Length,
+ * or by the count as it streams — and a decoded file past `maxFileBytes` are
+ * refused with 413, the stream cancelled. An answer that is not the expected
+ * shape is a plain error (callers report it as the server failing).
  *
  * An error answer is read up to 64 KiB and the rest dropped — a long error page
  * is still an error, not an oversized file — then thrown as `MediaFetchError`,
  * carrying the status and parsed body the callers' error mapping expects.
  */
-export async function fetchCappedJson<T>(
+export async function fetchBase64Media<T>(
   client: typeof $fetch,
   url: string,
   options: Record<string, unknown>,
+  field: string,
   maxFileBytes: number,
-): Promise<T> {
+): Promise<{ fields: T | null, data: Buffer | undefined }> {
   const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
   const stream = response._data as ReadableStream<Uint8Array> | undefined
   if (!response.ok) {
     const text = stream ? (await readCapped(stream, 64 * 1024)).text : ''
     throw new MediaFetchError(response.status, safeJson(text))
   }
-  const body = stream ? await readCapped(stream, cappedBodyBytes(maxFileBytes)) : { text: '', truncated: false }
-  if (body.truncated) {
-    throw createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxFileBytes)} this connector fetches.` })
+  const tooLarge = () => createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxFileBytes)} this connector fetches.` })
+  if (!stream) return { fields: null, data: undefined }
+
+  const bodyLimit = cappedBodyBytes(maxFileBytes)
+  const declared = Number(response.headers.get('content-length') ?? '')
+  const known = Number.isSafeInteger(declared) && declared > 0
+  if (known && declared > bodyLimit) {
+    await stream.cancel().catch(() => {})
+    throw tooLarge()
   }
-  return JSON.parse(body.text) as T
+  const reader = new Base64FieldReader(field, maxFileBytes, known ? Math.floor(declared * 3 / 4) : undefined)
+  const source = stream.getReader()
+  let size = 0
+  try {
+    for (;;) {
+      const { done, value } = await source.read()
+      if (done) break
+      size += value.byteLength
+      if (size > bodyLimit) throw tooLarge()
+      reader.push(value)
+    }
+    const { json, data } = reader.end()
+    return { fields: JSON.parse(json) as T | null, data }
+  }
+  catch (error) {
+    await source.cancel().catch(() => {})
+    if (error instanceof Base64FieldError && error.reason === 'too-large') throw tooLarge()
+    throw error
+  }
 }
 
 /** At most `limit` bytes of a stream as text; past it, the stream is cancelled and `truncated` set. */
