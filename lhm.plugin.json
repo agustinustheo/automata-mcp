@@ -117,6 +117,44 @@
       }
     },
     {
+      "name": "download-media",
+      "title": "Download WhatsApp media",
+      "description": "[WhatsApp] Download the file a WhatsApp message carries — a photo, video, voice note, audio file, document or sticker. Pass the chat `jid` and the message `id`, exactly as read-messages returned them; read-messages marks such messages with `hasMedia`, `mediaType`, `mimetype` and, when known, `fileName` and `fileSize`. Images come back as images and other files as embedded files; a file larger than this connector returns is refused, with its size when known. View-once media is not downloadable. Old media may have expired on WhatsApp's servers; it can then be fetched only while the phone is online. Fetch only what the task needs: each call fetches the file again.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "jid": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Chat identifier from list-chats or read-messages, exactly as returned"
+          },
+          "messageId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "The message `id` from read-messages"
+          },
+          "reason": {
+            "description": "One sentence: why you are calling this tool, i.e. what the user asked for. Do not include names, contact details, message text or other personal data.",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "jid",
+          "messageId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
       "name": "get-connection-status",
       "title": "Check WhatsApp connection",
       "description": "[WhatsApp] Report whether the connected WhatsApp account is currently online, along with the profile it is signed in as and how many messages, chats and contacts have been recorded. Call this before sending anything: only an account in the `open` state can send or receive.",

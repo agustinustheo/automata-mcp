@@ -1163,6 +1163,30 @@ const CHAT_TS_INDEX: MessageIndexSpec = {
   reported: new Set<string>(),
 }
 
+const KEY_ID_INDEX: MessageIndexSpec = {
+  // Up to the second column, so trailing columns count too.
+  shape: '%USING btree ("instanceId", ((key ->> \'id\'::text))%',
+  partial: false,
+  label: '[media]',
+  fallback: 'refusing media downloads on Evolution servers that find media by id alone',
+  missing: '"Message" has no index on ("instanceId", (key->>\'id\')), so download-media cannot check '
+    + 'cheaply that a message id is unique to the token\'s chats and refuses on Evolution servers that '
+    + 'reload media by id alone (evolution-api-reforged). Create message_instance_key_id_idx: see '
+    + 'docs/whatsapp.md "Indexes on Evolution\'s tables".',
+  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
+  reported: new Set<string>(),
+}
+
+/**
+ * Whether this message database has an index on ("instanceId", key->>'id'),
+ * which makes `messageIdShared` an index probe instead of a scan of the
+ * account. Same detection as the chat index: by shape, cached ten minutes.
+ */
+export async function messageKeyIdIndexPresent(instance: AppInstance): Promise<boolean> {
+  const { query } = await evolutionDbFor(instance)
+  return await messageIndexPresent(instance, query, KEY_ID_INDEX)
+}
+
 const INSTANCE_TS_INDEX: MessageIndexSpec = {
   // Up to the second column, so `DESC` and trailing columns count too.
   shape: '%USING btree ("instanceId", "messageTimestamp"%',
@@ -1325,6 +1349,94 @@ export async function lastMessagePayloads(instance: AppInstance, rowIds: string[
   `)
 
   return new Map(rows.map(row => [row.id, row.message]))
+}
+
+/** One stored message, as `download-media` needs it: the key and payload Evolution downloads from. */
+export interface StoredMessage {
+  key: MessageKey | null
+  message: unknown
+  messageType: string | null
+}
+
+/**
+ * One message by its WhatsApp id, **only if it sits in one of `jids`** — the
+ * chats the caller's token reaches, already scope-checked by `expandChat`.
+ *
+ * The chat predicate is the point. Evolution's own media route finds a message
+ * by `key.id` alone, account-wide, so a token scoped to one chat that named a
+ * message id from another would otherwise download that chat's photo. Here the
+ * id is resolved inside the allowed chats or not at all, and the row handed to
+ * Evolution is this one.
+ *
+ * Copies of one message (see `listMessagesPage`) carry the same payload; the
+ * newest is taken, deterministically.
+ */
+export async function findMessageInChats(
+  instance: AppInstance,
+  jids: readonly [string, ...string[]],
+  messageId: string,
+): Promise<StoredMessage | undefined> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  let rows: StoredMessage[]
+  try {
+    rows = await query(sql => sql<StoredMessage[]>`
+      SELECT key, message, "messageType"
+      FROM "Message"
+      WHERE "instanceId" = ${instanceId}
+        AND key->>'remoteJid' = ANY(${[...jids]}::text[])
+        AND key->>'id' = ${messageId}
+      ORDER BY "messageTimestamp" DESC, id
+      LIMIT 1
+    `)
+  }
+  catch (error) {
+    throw readFailure('[media]', 'Reading the message is temporarily unavailable', error)
+  }
+  return rows[0]
+}
+
+/**
+ * Whether another, **distinct** message of this account shares this id — in
+ * any other chat, in the same chat in the other direction (sent vs.
+ * received), or in the same group from another sender. Copies of the same
+ * message (same chat, direction and sender) are not distinct and do not count;
+ * copies recording the sender differently are refused too, the safe side.
+ *
+ * A WhatsApp message id is chosen by the sending device, so it is not unique,
+ * and evolution-api-reforged's media route ignores the row a caller sends and
+ * reloads the message by `key.id` alone (its unique index is per chat and
+ * direction, not per id). When the id is shared, which message Evolution
+ * downloads is not ours to decide — another chat's file, in or out of the
+ * token's scope, or the wrong one in this chat — so the download is refused.
+ * Answers a boolean only: nothing about the other message is read.
+ *
+ * Only call it with `messageKeyIdIndexPresent` true: without that index this is
+ * a scan of every message the account holds.
+ */
+export async function messageIdShared(instance: AppInstance, key: MessageKey): Promise<boolean> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  try {
+    const [row] = await query(sql => sql<Array<{ shared: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1 FROM "Message"
+        WHERE "instanceId" = ${instanceId}
+          AND key->>'id' = ${key.id ?? ''}
+          AND NOT (
+            key->>'remoteJid' IS NOT DISTINCT FROM ${key.remoteJid ?? null}
+            AND COALESCE((key->>'fromMe')::boolean, false) = ${Boolean(key.fromMe)}
+            AND key->>'participant' IS NOT DISTINCT FROM ${key.participant ?? null}
+          )
+      ) AS shared
+    `)
+    return row?.shared === true
+  }
+  catch (error) {
+    throw readFailure('[media]', 'Reading the message is temporarily unavailable', error)
+  }
 }
 
 export interface LidLocalPartOptions {

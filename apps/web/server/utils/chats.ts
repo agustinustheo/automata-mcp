@@ -91,7 +91,7 @@ export interface ChatMessage {
   unreadable?: UnreadableReason
   /**
    * Set only on a message carrying a file — photo, video, voice note, audio,
-   * document or sticker — so a caller knows the message has one.
+   * document or sticker — so a caller knows what `download-media` can fetch.
    * Absent on everything else: these keys are additive and never `false`.
    */
   hasMedia?: true
@@ -1287,7 +1287,7 @@ const MEDIA_KINDS: ReadonlyArray<readonly [string, string]> = [
 ]
 
 /** The media node a payload carries: its payload key, its kind, and the node itself. */
-interface WhatsappMediaNode {
+export interface WhatsappMediaNode {
   key: string
   kind: string
   node: Record<string, any>
@@ -1338,6 +1338,18 @@ function mediaOfNode(media: WhatsappMediaNode | undefined): WhatsappMediaInfo | 
 
 function mediaOfPayload(payload: Record<string, any> | undefined): WhatsappMediaInfo | undefined {
   return mediaOfNode(mediaNodeOf(payload))
+}
+
+/**
+ * The media a stored WhatsApp message carries, through the same unwrapping
+ * `read-messages` applies: `info` when it is downloadable, and the raw `node`
+ * either way (undefined for a control record or a message with no file).
+ */
+export function whatsappMediaOf(message: unknown, messageType?: string): { info?: WhatsappMediaInfo, node?: WhatsappMediaNode } {
+  const content = classifyContent(message, messageType)
+  if (content.noise) return {}
+  const node = mediaNodeOf(content.payload)
+  return { info: mediaOfNode(node), node }
 }
 
 /**

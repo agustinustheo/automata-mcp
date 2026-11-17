@@ -141,6 +141,11 @@ export default defineNuxtConfig({
     imapBackfillMax: '50000',
     imapAttachmentMaxBytes: String(10 * 1024 * 1024),
 
+    // WhatsApp media downloads (download-media): the largest file fetched and
+    // returned in the tool result; larger ones are refused. Never stored. See
+    // server/utils/media.ts.
+    mediaInlineMaxBytes: String(5 * 1024 * 1024),
+
     // Per-minute budgets on /mcp, so one runaway agent loop cannot slow the
     // shared backends for everyone: every request per token and per
     // organization, and calls to costly tools (searches, run-query) per

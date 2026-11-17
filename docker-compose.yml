@@ -94,6 +94,9 @@ services:
       NUXT_MCP_RATE_TOKEN_PER_MINUTE: ${MCP_RATE_TOKEN_PER_MINUTE:-120}
       NUXT_MCP_RATE_ORG_PER_MINUTE: ${MCP_RATE_ORG_PER_MINUTE:-600}
       NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE: ${MCP_RATE_EXPENSIVE_PER_MINUTE:-30}
+      # Media downloads (download-media). Empty = the default (5 MiB). See
+      # docs/whatsapp.md "Media in messages".
+      NUXT_MEDIA_INLINE_MAX_BYTES: ${MEDIA_INLINE_MAX_BYTES:-}
       # Optional Redis for rate-limit counts and short-lived caches shared
       # across replicas. Empty = kept in-process.
       NUXT_REDIS_URL: ${REDIS_URL:-}
