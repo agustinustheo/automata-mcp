@@ -110,6 +110,8 @@ export function readOnlyScope(readToolNames: string[]): TokenScope {
 export function describeScope(scope: TokenScope, kind: InstanceKind): string {
   let dataOpen: boolean
   let data: string
+  // Whether this kind has opt-in media downloads, which "All actions" leaves out.
+  let hasMedia = false
   switch (kind) {
     case 'postgres':
       dataOpen = scope.all_tables
@@ -119,6 +121,7 @@ export function describeScope(scope: TokenScope, kind: InstanceKind): string {
     case 'telegram':
       dataOpen = scope.all_chats
       data = scope.all_chats ? 'All chats' : plural(scope.chat_jids.length, 'chat')
+      hasMedia = true
       break
     // Folders ride the chat axis (`chat_jids` holds paths on a mail token).
     case 'imap':
@@ -130,9 +133,14 @@ export function describeScope(scope: TokenScope, kind: InstanceKind): string {
   }
 
   // Under "All actions" the only names kept are opt-in tools (media downloads).
-  const media = scope.all_tools && scope.tool_names.some(isOptInTool) ? ' + media downloads' : ''
-  if (scope.all_tools && dataOpen) return `Full access${media}`
-  return [data, scope.all_tools ? `all actions${media}` : plural(scope.tool_names.length, 'action')].join(' · ')
+  const media = scope.all_tools && scope.tool_names.some(isOptInTool)
+  // "Full access" only when nothing is held back: where media downloads exist,
+  // leaving them unticked is a real limit, and the list must say so.
+  if (scope.all_tools && dataOpen && (!hasMedia || media)) return 'Full access'
+  const actions = scope.all_tools
+    ? (media ? 'all actions + media downloads' : hasMedia ? 'all actions except media downloads' : 'all actions')
+    : plural(scope.tool_names.length, 'action')
+  return [data, actions].join(' · ')
 }
 
 /** What the disclaimer field holds when an admin turns it on. Editable from there. */

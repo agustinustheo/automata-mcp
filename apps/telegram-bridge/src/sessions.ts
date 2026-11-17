@@ -716,8 +716,10 @@ export class SessionManager {
         // bounded by `stop` too: on abort this stream ends at once, and the
         // request it stops waiting for keeps a place in the download limit
         // until it settles (`holdAbandoned`).
-        const iterator = client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })[Symbol.asyncIterator]()
+        let iterator: AsyncIterator<Buffer> | undefined
         try {
+          // Made inside the try, so even a synchronous failure here gives the slot back.
+          iterator = client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })[Symbol.asyncIterator]()
           for (;;) {
             // Never start another Telegram request for a caller already gone.
             if (stop.aborted) throw stopped()
@@ -751,7 +753,7 @@ export class SessionManager {
         finally {
           release()
           // Not awaited: it queues behind a request that may still be pending.
-          iterator.return?.(undefined).catch(() => {})
+          iterator?.return?.(undefined).catch(() => {})
         }
       })()
       handedOff = true
@@ -852,7 +854,10 @@ export class SessionManager {
       if (outcome === 'slow') console.error(`[media] ${sessionId}: reconnect to end an unanswered download request is taking over ${MEDIA_TEARDOWN_RECONNECT_MS / 1000}s; disconnecting the client directly`)
     }
     if (stillHeld()) {
-      await client.disconnect().catch(error => console.error(`[media] ${sessionId}: disconnecting the client failed: ${describeError(error)}`))
+      // Bounded like `destroyClient`, so a hung disconnect still lets the
+      // caller arm its "still pending after teardown" log.
+      await withTimeout(client.disconnect(), DISPOSE_TIMEOUT_MS)
+        .catch(error => console.error(`[media] ${sessionId}: disconnecting the client failed: ${describeError(error)}`))
     }
   }
 
