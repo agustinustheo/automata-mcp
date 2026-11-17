@@ -74,7 +74,8 @@ function initialScope(): TokenScope {
       return openScope()
     case 'postgres':
     case 'imap': {
-      const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
+      // Opt-in tools stay unticked: a preset must never grant what "All actions" withholds.
+      const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly && !t.optIn).map(t => t.name)
       return readOnlyScope(readTools)
     }
     default:

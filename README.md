@@ -137,7 +137,7 @@ Details: <https://www.getautomata.app/docs/permissions>.
 
 ## MCP tools
 
-Automata has 22 MCP tools; a connection only exposes the tools for its kind. Full reference: <https://www.getautomata.app/docs/reference/mcp-tools>.
+Automata has 24 MCP tools; a connection only exposes the tools for its kind. Full reference: <https://www.getautomata.app/docs/reference/mcp-tools>.
 
 | Connector | Tool | What it does |
 |---|---|---|
@@ -146,11 +146,13 @@ Automata has 22 MCP tools; a connection only exposes the tools for its kind. Ful
 | | `read-messages` | One chat's messages, newest first, paged, with optional date range |
 | | `search-messages` | Messages containing every word of a query |
 | | `send-text-message` | Send a text message (**write**) |
+| | `download-media` | The photo, video, voice note or file a message carries (opt-in) |
 | Telegram | `get-telegram-status` | Whether the account is linked and online, and sync progress |
 | | `list-telegram-chats` | Synced chats in scope: private chats, groups, supergroups, channels |
 | | `read-telegram-messages` | One chat's messages, newest first, paged |
 | | `search-telegram-messages` | Messages and captions containing every word of a query |
 | | `send-telegram-message` | Send plain text to a chat, @username or phone number (**write**) |
+| | `download-telegram-media` | The photo, video, voice message or file a message carries (opt-in) |
 | Email | `get-mailbox-status` | Which mailbox, whether sync works, when it last ran |
 | | `list-mail-folders` | Folders in scope with synced and unread counts |
 | | `list-emails` | Email headers, newest first, with filters |

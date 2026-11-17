@@ -22,10 +22,10 @@ App's own data (users, sessions, organizations, connections + credentials, token
 
 `README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `two-factor.md`, `using-automata.md`, `releases.md`, `billing.md`; `docs/README.md` indexes them. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
 
-**Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-two MCP tools, gated by kind:
+**Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-four MCP tools, gated by kind:
 
-- `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`
-- `telegram`: `get-telegram-status`, `list-telegram-chats`, `read-telegram-messages`, `search-telegram-messages`, `send-telegram-message`
+- `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`, `download-media` (opt-in)
+- `telegram`: `get-telegram-status`, `list-telegram-chats`, `read-telegram-messages`, `search-telegram-messages`, `send-telegram-message`, `download-telegram-media` (opt-in)
 - `postgres` (the `sql/` group): `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
 - `imap`: `get-mailbox-status`, `list-mail-folders`, `list-emails`, `search-emails`, `read-email`, `get-email-attachment`, `create-email-draft` (write)
 
@@ -287,6 +287,20 @@ Deliberate non-goals, not oversights: deletion dropped like any control record, 
 **Token redaction:** `server/plugins/redact-mcp.ts` scrubs `event.node.req.originalUrl` (what Nitro's error handler reads — scrubbing `event.path` alone insufficient) and sets `event.context.noLog`. `mcp.logging` off for same reason. Route any added error reporter/logger through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 
 **Request bodies capped before buffering** (`body-limit.ts`): `middleware/00-body-limit.ts` reads every non-MCP body into h3's raw-body cache under per-path cap (64 KiB; token scope 1 MiB; webhooks 256 KiB) → 413, so later `readBody` replays bounded buffer. `/mcp` capped in `server/mcp/index.ts` *after* auth (2 MiB). Never attach own `data` listener; `mcp.logging` stays off also because toolkit's evlog tag reads body before auth.
+
+## Media downloads
+
+`download-media` (WhatsApp) and `download-telegram-media` fetch the file a message carries; `read-messages` marks such messages `hasMedia` + `mediaType`/`mimetype`/`fileName`/`fileSize` (additive keys, absent otherwise; `whatsappMediaOf()` in `chats.ts`, same unwrapping as `classifyContent` plus one `ephemeralMessage` level, never `viewOnceMessage*`). `media.ts` = caps, signed URLs, result shape; `whatsapp-media.ts` = find + download; route `server/routes/mcp-media/[blob].get.ts`. Never stored, like IMAP attachments.
+
+Rules easy to undo:
+
+- **Opt-in, not covered by `all_tools`.** `shared/opt-in-tools.ts` lists them; `isToolAllowed` grants one only by name, `scopeFromInput` keeps opt-in names when `all_tools` (and only those), picker shows them in their own block in both modes, read-only preset never ticks them. Otherwise every all-actions token starts downloading files on upgrade.
+- **Message looked up inside the scoped chats** (`findMessageInChats`, `remoteJid = ANY(jids)` in SQL, after `expandChat`). Evolution's `getBase64FromMediaMessage` finds by `key.id` account-wide, so a token scoped to one chat naming another chat's message id would get its photo. The verified row is sent in the body: 2.3.7 downloads from it; reforged ignores caller content (its SSRF fix) and reloads by `key.id`, unique per account after its migration.
+- **Size refused from the payload's `fileLength` before downloading, re-checked on the bytes.** `NUXT_MEDIA_MAX_BYTES` (25 MiB) overall, `NUXT_MEDIA_INLINE_MAX_BYTES` (5 MiB) inline; between, a signed URL.
+- **Signed URL ≠ bearer credential.** HMAC (key derived from `NUXT_WEBHOOK_SECRET` under its own label) over `{kind, instance, token, chat, message, exp}`, 10 min. The route requires the **same** token in `Authorization` (`isMcpPath` covers `/mcp-media/`: no cookie, path redacted), then re-runs limit refusal, `isToolAllowed`, budgets (charged as one call of the tool) and scope before fetching. Mismatch = 404, expired = 410. URL holds no bytes. Unset secret or `NUXT_PUBLIC_APP_URL` → no URLs (501), inline still works.
+- **`expensive: true`** — every call and every followed URL charges the per-connection costly budget.
+- **Telegram goes through the bridge** (`GET /sessions/:id/media`, session key, `needsTelegram`): message fetched **through the chat's peer** and refused unless `markedId(peerId)` is that chat — private chats and basic groups share one id counter per account. Self-destructing media (`ttlSeconds`) refused. Bridge caps at 50 MiB whatever is asked, size checked from `Document.size` / largest `PhotoSize` before download, again on bytes. App checks `assertChatAllowed` + synced row (`telegramMessageMedia`) first. File in memory only, base64 in the answer.
+- **Untrusted metadata cleaned** (`cleanMimeType` → `type/subtype` or octet-stream, `cleanFileName`); the route answers `nosniff`, `attachment`, `CSP: sandbox`, `no-store`.
 
 ## MCP rate limits
 
