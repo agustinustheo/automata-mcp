@@ -699,6 +699,9 @@ export class SessionManager {
             }
             yield chunk
           }
+          // teleproto's loop may simply stop on an aborted signal rather than
+          // throw: a stream cut short must never end as if the file were whole.
+          if (stop.aborted) throw stopped()
         }
         catch (error) {
           if (stop.aborted) throw stopped()

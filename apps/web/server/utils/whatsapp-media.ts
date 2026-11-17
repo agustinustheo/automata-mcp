@@ -42,10 +42,11 @@ export async function findWhatsappMedia(auth: WhatsappAuth, jid: string, message
   }
 
   // An Evolution that reloads the message by id alone (evolution-api-reforged)
-  // could hand back another chat's file when the sender-chosen id repeats there.
-  // Stock 2.x downloads from the row we send, so needs no check. Otherwise the
-  // check runs only through its index — never as a scan of the account — and
-  // fails closed without it.
+  // could hand back another message's file when the sender-chosen id repeats —
+  // in another chat, or in this one in the other direction. Stock 2.x downloads
+  // from the row we send, so needs no check. Otherwise the check runs only
+  // through its index — never as a scan of the account — and fails closed
+  // without it.
   if (!(await evolutionUsesSentPayload(auth))) {
     if (!(await messageKeyIdIndexPresent(auth.instance))) {
       throw createError({
@@ -55,10 +56,10 @@ export async function findWhatsappMedia(auth: WhatsappAuth, jid: string, message
           + 'docs/whatsapp.md "Indexes on Evolution\'s tables".',
       })
     }
-    if (await messageIdOutsideChats(auth.instance, chat.jids, messageId)) {
+    if (!row.key || await messageIdShared(auth.instance, row.key)) {
       throw createError({
         statusCode: 409,
-        message: 'Another chat this connector token cannot read holds a message with the same id, so this file cannot be told apart safely and was not downloaded.',
+        message: 'Another message on this account has the same id, so this WhatsApp server cannot be trusted to return this one\'s file; it was not downloaded.',
       })
     }
   }
@@ -152,7 +153,7 @@ function downloadPayload(media: WhatsappMediaNode): Record<string, unknown> {
  * Evolution 2.3.7 downloads from the payload as sent (`downloadPayload`);
  * evolution-api-reforged ignores caller content on this route and reloads the
  * stored message by `key.id` alone, which is why `findWhatsappMedia` refuses an
- * id that also exists in a chat outside the token's scope.
+ * id another distinct message of the account shares.
  *
  * The answer is read through `fetchCappedJson`, so a file over `maxBytes` — the
  * sender's `fileLength` is only a claim — is cut off while it streams, before it
