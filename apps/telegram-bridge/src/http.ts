@@ -33,7 +33,7 @@ interface Reply {
    * whole (media). Errors before the first chunk still answer as JSON; one after
    * it can only end the connection, which the caller reads as a broken download.
    */
-  stream?: { headers: Record<string, string>, chunks: AsyncIterable<Buffer> }
+  stream?: { headers: Record<string, string>, chunks: AsyncIterable<Buffer>, signal?: AbortSignal }
 }
 
 interface Route {
@@ -321,7 +321,9 @@ async function sendStream(res: ServerResponse, status: number, stream: NonNullab
         yield step.value
       }
     })()
-    await pipeline(Readable.from(all), res)
+    // The producer's own signal bounds delivery too, so a reader that stalls
+    // under backpressure cannot outlive the bridge's deadline.
+    await pipeline(Readable.from(all), res, ...(stream.signal ? [{ signal: stream.signal }] : []))
   }
   catch (error) {
     // Before the headers: an ordinary error answer. After: only the connection
