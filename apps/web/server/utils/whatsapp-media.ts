@@ -5,6 +5,9 @@ type WhatsappAuth = Extract<McpAuth, { kind: 'whatsapp' }>
 /**
  * WhatsApp media for one message: find it inside the token's chats, describe
  * it, and — when asked — download it through Evolution.
+ *
+ * One function serves the `download-media` tool and the signed-URL route, so
+ * both run the same scope check against the same token on every fetch.
  */
 
 export interface WhatsappMediaTarget {
@@ -264,8 +267,11 @@ export async function downloadWhatsappMedia(auth: WhatsappAuth, target: Whatsapp
   return await withMediaSlot(auth.instance.id, () => fetchWhatsappMedia(auth, target, maxBytes))
 }
 
-/** The download itself; `downloadWhatsappMedia` runs it in a media slot. */
-async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMediaTarget, maxBytes: number): Promise<MediaFile> {
+/**
+ * `downloadWhatsappMedia` without the slot, for a caller that holds one itself
+ * for longer — the signed-URL route keeps it until the file is delivered.
+ */
+export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMediaTarget, maxBytes: number): Promise<MediaFile> {
   const evolution = createEvolutionClient(auth.evolution)
   let answer: { fields: EvolutionMedia | null, data: Buffer | undefined }
   try {

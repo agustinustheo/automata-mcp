@@ -119,7 +119,7 @@
     {
       "name": "download-media",
       "title": "Download WhatsApp media",
-      "description": "[WhatsApp] Download the file a WhatsApp message carries — a photo, video, voice note, audio file, document or sticker. Pass the chat `jid` and the message `id`, exactly as read-messages returned them; read-messages marks such messages with `hasMedia`, `mediaType`, `mimetype` and, when known, `fileName` and `fileSize`. Images come back as images and other files as embedded files; a file larger than this connector returns is refused, with its size when known. View-once media is not downloadable. Old media may have expired on WhatsApp's servers; it can then be fetched only while the phone is online. Fetch only what the task needs: each call fetches the file again.",
+      "description": "[WhatsApp] Download the file a WhatsApp message carries — a photo, video, voice note, audio file, document or sticker. Pass the chat `jid` and the message `id`, exactly as read-messages returned them; read-messages marks such messages with `hasMedia`, `mediaType`, `mimetype` and, when known, `fileName` and `fileSize`. Images come back as images and other files as embedded files, when small enough; a larger file comes back as a `url` that works for ten minutes when fetched with this connection's Authorization header, and only for this token (a client that puts the token in the URL path cannot follow it: use `inline`). `delivery` chooses: `auto` (default) inlines small files, `url` always returns a link (the file is fetched when the link is followed), `inline` never does. View-once media is not downloadable. Old media may have expired on WhatsApp's servers; it can then be fetched only while the phone is online. Fetch only what the task needs: each download — inline, or a link followed — fetches the file again.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -135,6 +135,16 @@
             "maxLength": 200,
             "pattern": "^[A-Za-z0-9_-]+$",
             "description": "The message `id` from read-messages"
+          },
+          "delivery": {
+            "default": "auto",
+            "description": "auto: inline when small, else a signed URL. inline: never a URL. url: always a URL.",
+            "type": "string",
+            "enum": [
+              "auto",
+              "inline",
+              "url"
+            ]
           },
           "reason": {
             "description": "One sentence: why you are calling this tool, i.e. what the user asked for. Do not include names, contact details, message text or other personal data.",

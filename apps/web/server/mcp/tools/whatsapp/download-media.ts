@@ -13,10 +13,15 @@ import { z } from 'zod'
  * token's chats only — Evolution's own media route would find any message of
  * the account by id.
  *
- * **Returned in the result, up to `mediaInlineMaxBytes`**: images as images,
- * anything else as an embedded file, as `get-email-attachment` does. A larger
- * file is refused — by the sender's reported size without fetching, or
- * mid-stream when that size was missing or wrong.
+ * **Small files inline, larger ones by signed URL.** Up to `mediaInlineMaxBytes`
+ * the bytes come back in the result (images as images, anything else as an
+ * embedded file, as `get-email-attachment` does); above it, up to
+ * `mediaMaxBytes`, a URL valid for ten minutes that only this token can follow,
+ * which re-runs every check here before fetching. Above that, refused with the
+ * size. A size the sender did not give is found out by fetching capped at the
+ * inline limit, so this process never buffers a large file whole twice (though
+ * Evolution, which always fetches the whole file, may do so again when the link
+ * is followed).
  */
 export default defineKindTool({
   name: 'download-media',
@@ -27,10 +32,14 @@ export default defineKindTool({
     + 'document or sticker. Pass the chat `jid` and the message `id`, exactly as read-messages '
     + 'returned them; read-messages marks such messages with `hasMedia`, `mediaType`, `mimetype` '
     + 'and, when known, `fileName` and `fileSize`. Images come back as images and other files '
-    + 'as embedded files; a file larger than this connector returns is refused, with its size when '
-    + 'known. View-once media is not downloadable. Old media may have expired on WhatsApp\'s '
-    + 'servers; it can then be fetched only while the phone is online. Fetch only what the task '
-    + 'needs: each call fetches the file again.',
+    + 'as embedded files, when small enough; a larger file comes back as a `url` that works for '
+    + 'ten minutes when fetched with this connection\'s Authorization header, and only for this '
+    + 'token (a client that puts the token in the URL path cannot follow it: use `inline`). '
+    + '`delivery` chooses: `auto` (default) inlines small files, `url` always returns a link '
+    + '(the file is fetched when the link is followed), `inline` never does. View-once media is '
+    + 'not downloadable. Old media may have expired on WhatsApp\'s servers; it can then be '
+    + 'fetched only while the phone is online. Fetch only what the task needs: each download — '
+    + 'inline, or a link followed — fetches the file again.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -41,37 +50,65 @@ export default defineKindTool({
   inputSchema: {
     jid: z.string().min(1).max(200).describe('Chat identifier from list-chats or read-messages, exactly as returned'),
     messageId: z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/, 'a WhatsApp message id').describe('The message `id` from read-messages'),
+    delivery: z.enum(['auto', 'inline', 'url']).default('auto')
+      .describe('auto: inline when small, else a signed URL. inline: never a URL. url: always a URL.'),
   },
-  handler: async ({ jid, messageId }) => {
+  handler: async ({ jid, messageId, delivery }) => {
     const auth = useMcpAuth()
     if (auth.kind !== 'whatsapp') throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
 
     const target = await findWhatsappMedia(auth, jid, messageId)
-    const maxBytes = mediaInlineMaxBytes()
+    const maxBytes = mediaMaxBytes()
+    const inlineMax = mediaInlineMaxBytes()
     const claimed = target.meta.size
 
-    // Too large by the sender's own account: say so without fetching.
-    if (claimed !== undefined && claimed > maxBytes) throw tooLarge(claimed, maxBytes)
+    if (claimed !== undefined && claimed > maxBytes) {
+      throw createError({
+        statusCode: 413,
+        message: `This file is about ${formatBytes(claimed)}, larger than the ${formatBytes(maxBytes)} this connector fetches.`,
+      })
+    }
 
-    // The size is a claim, or missing: fetched capped, and a file over the cap
-    // is refused (413) while it streams in.
+    const meta = { jid, messageId, ...target.meta }
+    // `over`: the file is known to be over the inline limit (wording of the refusal only).
+    const link = (described: Record<string, unknown>, over?: { size?: number }) => {
+      const signed = signMediaUrl({ k: 'whatsapp', i: auth.instance.id, t: auth.tokenId, c: jid, m: messageId })
+      if (!signed) throw signedUrlUnavailable(inlineMax, over)
+      return mediaUrlResult(described, signed.url, signed.expiresAt)
+    }
+
+    // Too large for inline by the sender's own account: say so without fetching.
+    if (delivery === 'inline' && claimed !== undefined && claimed > inlineMax) {
+      throw inlineRefusal(claimed, inlineMax)
+    }
+
+    // Known to be large, or the caller asked for a link: no download here — the
+    // URL fetches it when followed.
+    if (delivery === 'url') return link(meta)
+    if (delivery === 'auto' && claimed !== undefined && claimed > inlineMax) return link(meta, { size: claimed })
+
+    // The size is a claim, or missing: fetch capped at the inline limit. A file
+    // over it is refused (413) mid-stream; `auto` then answers with a link rather
+    // than downloading it whole here and again when the link is followed.
     let file: MediaFile
     try {
-      file = await downloadWhatsappMedia(auth, target, maxBytes)
+      file = await downloadWhatsappMedia(auth, target, inlineMax)
     }
     catch (error) {
-      // Over the cap by its bytes, whatever the sender claimed: no size quoted.
-      if (httpStatusOf(error) === 413) throw tooLarge(undefined, maxBytes)
-      throw error
+      if (httpStatusOf(error) !== 413) throw error
+      // Over the inline cap by its bytes, whatever the sender claimed: no size quoted.
+      if (delivery === 'inline') throw inlineRefusal(undefined, inlineMax)
+      return link(meta, {})
     }
-    const fetched = { jid, messageId, ...target.meta, mimeType: file.mimeType, size: file.data.length, ...(file.fileName && { fileName: file.fileName }) }
+    const fetched = { ...meta, mimeType: file.mimeType, size: file.data.length, ...(file.fileName && { fileName: file.fileName }) }
     return mediaInlineResult(fetched, file)
   },
 })
 
-function tooLarge(size: number | undefined, maxBytes: number) {
+function inlineRefusal(size: number | undefined, inlineMax: number) {
   return createError({
     statusCode: 413,
-    message: `This file is ${size !== undefined ? `about ${formatBytes(size)}, ` : ''}larger than the ${formatBytes(maxBytes)} this connector returns.`,
+    message: `This file is ${size !== undefined ? `about ${formatBytes(size)}, ` : ''}over the ${formatBytes(inlineMax)} returned inline. `
+      + 'Call again with delivery: "url".',
   })
 }
