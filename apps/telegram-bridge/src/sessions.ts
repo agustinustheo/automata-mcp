@@ -5,6 +5,7 @@ import { digestsEqual, hashKey, mintKey, seal, sessionContext, unseal, webhookCo
 import type { Sql } from './db.ts'
 import { HttpError, describeError, telegramNotConfigured } from './http-error.ts'
 import { SessionLocks } from './locks.ts'
+import { type MediaInfo, mediaInfoOf } from './media.ts'
 import { chatRow, entityId, inputPeerFor, markedId, usersOf } from './sync/convert.ts'
 import { type BackfillStop, type ChatListing, SyncStore } from './sync/store.ts'
 import { type BackfillOptions, SessionSync, type SyncStatus, heapMb } from './sync/syncer.ts'
@@ -642,6 +643,76 @@ export class SessionManager {
     }
     await rt.sync?.saveMessages([message])
     return { chatId, messageId: message.id, date: new Date(message.date * 1000).toISOString() }
+  }
+
+  /**
+   * Download the file one message carries, into memory, and hand it back.
+   * Nothing is written to disk or to the database.
+   *
+   * The message is fetched **through the chat** and then checked to belong to
+   * it: private chats and basic groups share one message-id counter per
+   * account, so an id alone could name a message in another chat. A file over
+   * `maxBytes` is refused from its reported size before downloading, and again
+   * on the bytes.
+   */
+  async media(id: string, chatId: string, messageId: number, maxBytes: number): Promise<{
+    mediaType: MediaInfo['mediaType']
+    mimeType: string
+    fileName?: string
+    size: number
+    data: string
+  }> {
+    await this.row(id)
+    const rt = this.runtime(id)
+    const client = this.connectedClient(rt)
+    const store = new SyncStore(this.sql, id)
+
+    const chat = await store.chat(chatId)
+    const accessHash = chat?.access_hash ?? (BigInt(chatId) > 0n ? await store.userAccessHash(chatId) : null)
+    const peer = chat || accessHash ? inputPeerFor(chatId, accessHash) : undefined
+    if (!peer) {
+      throw new HttpError(404, 'This chat is not known to the bridge. List chats first.')
+    }
+
+    let message: Api.Message | undefined
+    try {
+      const [found] = await client.getMessages(peer, { ids: [messageId] })
+      message = found instanceof Api.Message ? found : undefined
+    }
+    catch (error) {
+      throw toHttpError(error)
+    }
+    if (!message || markedId(message.peerId) !== chatId) {
+      throw new HttpError(404, 'No message with this id in this chat.')
+    }
+
+    const info = mediaInfoOf(message.media)
+    if (!info) {
+      throw new HttpError(422, 'This message carries no downloadable file (self-destructing media is not downloadable).')
+    }
+    if (info.size !== undefined && info.size > maxBytes) {
+      throw new HttpError(413, `This file is ${info.size} bytes, over the ${maxBytes} this connector fetches.`)
+    }
+
+    let data: string | Buffer | undefined
+    try {
+      data = await client.downloadMedia(message, {})
+    }
+    catch (error) {
+      throw toHttpError(error)
+    }
+    if (!Buffer.isBuffer(data)) throw new HttpError(502, 'Telegram returned no file for this message.')
+    if (data.length > maxBytes) {
+      throw new HttpError(413, `This file is ${data.length} bytes, over the ${maxBytes} this connector fetches.`)
+    }
+
+    return {
+      mediaType: info.mediaType,
+      mimeType: info.mimeType,
+      ...(info.fileName && { fileName: info.fileName }),
+      size: data.length,
+      data: data.toString('base64'),
+    }
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────

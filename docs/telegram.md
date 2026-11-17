@@ -152,6 +152,27 @@ part in them and cannot be synced by any client.
 dashboard or by deleting the connection. A session ended from Telegram → Devices
 keeps them, because the likeliest next step is linking the same account again.
 
+## Downloading media
+
+`read-telegram-messages` reports `media` (`photo`, `document`, …) on a message
+that carries something. `download-telegram-media` fetches the file by `chatId`
+and message `id`, through the bridge's `GET /sessions/:id/media`.
+
+- **Opt-in per token**, like WhatsApp's `download-media`: never included in "All
+  actions"; tick it under *Media downloads* in the token's scope.
+- **Scope first.** The app refuses a chat outside the token's scope, then the
+  bridge fetches the message through that chat and refuses one that belongs to
+  another — private chats and basic groups share one message-id counter per
+  account, so an id alone could name a message elsewhere.
+- **Never stored.** The bridge downloads into memory and answers with the bytes;
+  nothing is written to disk or to the `telegram` schema.
+- **Sizes.** Same as WhatsApp: up to `NUXT_MEDIA_INLINE_MAX_BYTES` (5 MiB) inline,
+  up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) as a 10-minute signed `/mcp-media/` link
+  that only the same token can follow. The bridge also refuses anything over
+  50 MiB, checked from the size Telegram reports before downloading.
+- **Not downloadable:** self-destructing media, and anything while the account
+  is not online (`get-telegram-status`).
+
 ## One bridge process at a time
 
 Two processes using the same Telegram session make Telegram kill it, which costs

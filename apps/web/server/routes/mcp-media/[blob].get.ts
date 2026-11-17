@@ -52,6 +52,12 @@ export default defineEventHandler(async (event) => {
     }
     file = await downloadWhatsappMedia(auth, target, maxBytes)
   }
+  else if (auth.kind === 'telegram') {
+    const messageId = Number(ref.m)
+    assertChatAllowed(auth.scope, ref.c)
+    await findTelegramMedia(auth, ref.c, messageId)
+    file = (await downloadTelegramMedia(auth, ref.c, messageId, maxBytes)).file
+  }
   else {
     throw createError({ statusCode: 404, statusMessage: 'Not Found' })
   }

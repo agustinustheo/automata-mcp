@@ -72,6 +72,19 @@ const sendBody = z.object({
   text: z.string().min(1).max(4096),
 })
 
+/**
+ * The bridge's own ceiling on one media download, whatever the caller asks
+ * for: the file is held in memory, base64 in the response, in a process every
+ * linked account shares.
+ */
+const MEDIA_MAX_BYTES = 50 * 1024 * 1024
+
+const mediaQuery = z.object({
+  chatId: z.string().regex(/^-?\d{1,20}$/, 'a chat id as a string of digits'),
+  messageId: z.coerce.number().int().positive().max(2 ** 31 - 1),
+  maxBytes: z.coerce.number().int().positive().max(MEDIA_MAX_BYTES).default(MEDIA_MAX_BYTES),
+})
+
 export function createBridgeServer(manager: SessionManager, config: BridgeConfig): Server {
   const adminDigest = hashKey(config.adminKey)
 
@@ -158,6 +171,13 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       handle: async ({ id, body }) => {
         const { chatId, text } = parse(sendBody, body)
         return { status: 200, body: await manager.send(id, chatId, text) }
+      },
+    },
+    {
+      label: 'GET /sessions/:id/media', method: 'GET', pattern: /^\/sessions\/([^/]+)\/media$/, access: 'session', needsTelegram: true,
+      handle: async ({ id, query }) => {
+        const { chatId, messageId, maxBytes } = parse(mediaQuery, Object.fromEntries(query))
+        return { status: 200, body: await manager.media(id, chatId, messageId, maxBytes) }
       },
     },
   ]
