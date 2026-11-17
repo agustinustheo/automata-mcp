@@ -9,6 +9,9 @@ type TelegramAuth = Extract<McpAuth, { kind: 'telegram' }>
  * then fetches the message through that chat and refuses one from any other.
  */
 
+/** The bridge's own ceiling on one download (`MEDIA_MAX_BYTES` in apps/telegram-bridge/src/http.ts). */
+const BRIDGE_MEDIA_MAX_BYTES = 50 * 1024 * 1024
+
 /**
  * The synced message's media kind, or a loud refusal: 404 when no such
  * message is synced in this chat, 422 when it carries no media.
@@ -27,32 +30,48 @@ export async function findTelegramMedia(auth: TelegramAuth, chatId: string, mess
   return media
 }
 
-/** Download the file. The bridge enforces `maxBytes` before and after downloading. */
+/**
+ * Download the file. The bridge refuses anything over `maxBytes` from the size
+ * Telegram reports, before downloading, and aborts a download that passes it;
+ * the answer is read through `fetchCappedJson` here as well. A 413 keeps the
+ * bridge's own words, so a caller can tell "too large" from "bridge down".
+ */
 export async function downloadTelegramMedia(
   auth: TelegramAuth,
   chatId: string,
   messageId: number,
   maxBytes: number,
 ): Promise<{ meta: MediaMeta, file: MediaFile }> {
-  let answer: BridgeMedia
-  try {
-    answer = await createTelegramBridge(auth.telegram).media(chatId, messageId, maxBytes)
-  }
-  catch (error) {
-    relayBridgeError(error, 'download the file')
-  }
+  const cap = Math.min(maxBytes, BRIDGE_MEDIA_MAX_BYTES)
+  return await withMediaSlot(async () => {
+    let answer: BridgeMedia
+    try {
+      answer = await createTelegramBridge(auth.telegram).media(chatId, messageId, cap)
+    }
+    catch (error) {
+      const status = httpStatusOf(error)
+      const said = (error as { data?: { error?: unknown } } | undefined)?.data?.error
+      if (status === 413) {
+        throw createError({ statusCode: 413, message: typeof said === 'string' ? said : `This file is larger than the ${formatBytes(cap)} this connector fetches.` })
+      }
+      if (status === 502) {
+        throw createError({ statusCode: 502, message: typeof said === 'string' ? said : 'Telegram returned no file for this message.' })
+      }
+      relayBridgeError(error, 'download the file')
+    }
 
-  const data = Buffer.from(answer.data, 'base64')
-  if (data.length > maxBytes) {
-    throw createError({
-      statusCode: 413,
-      message: `This file is ${formatMediaBytes(data.length)}, larger than the ${formatMediaBytes(maxBytes)} this connector fetches.`,
-    })
-  }
-  const mimeType = cleanMimeType(answer.mimeType)
-  const fileName = cleanFileName(answer.fileName)
-  return {
-    meta: { mediaType: answer.mediaType, mimeType, ...(fileName && { fileName }), size: data.length },
-    file: { data, mimeType, ...(fileName && { fileName }) },
-  }
+    const data = Buffer.from(answer.data, 'base64')
+    if (data.length > cap) {
+      throw createError({
+        statusCode: 413,
+        message: `This file is ${formatBytes(data.length)}, larger than the ${formatBytes(cap)} this connector fetches.`,
+      })
+    }
+    const mimeType = cleanMimeType(answer.mimeType)
+    const fileName = cleanFileName(answer.fileName)
+    return {
+      meta: { mediaType: answer.mediaType, mimeType, ...(fileName && { fileName }), size: data.length },
+      file: { data, mimeType, ...(fileName && { fileName }) },
+    }
+  })
 }

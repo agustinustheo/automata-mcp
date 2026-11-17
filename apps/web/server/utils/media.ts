@@ -1,10 +1,11 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto'
 import { assertNever } from '#shared/connection'
 
 /**
  * Media downloads for WhatsApp and Telegram messages: the size caps, the
- * signed-URL format, and the shape of a tool result carrying a file. The
- * per-kind fetching lives in `whatsapp-media.ts` and `telegram-media.ts`.
+ * signed-URL format, bounded reads, and the shape of a tool result carrying a
+ * file. The per-kind fetching lives in `whatsapp-media.ts` and
+ * `telegram-media.ts`.
  *
  * **Nothing is stored.** Bytes are fetched from Evolution or the bridge on each
  * call and handed straight back, the same rule as IMAP attachments. A signed
@@ -16,10 +17,19 @@ import { assertNever } from '#shared/connection'
  * requires the very token it was minted for in the `Authorization` header, then
  * re-checks that token's tool and chat scope. A URL copied out of a transcript
  * is useless without the token; a token without a fresh URL can call the tool.
+ *
+ * **Memory is bounded before bytes are held.** A sender's reported size is a
+ * claim, so every answer from Evolution or the bridge is read through
+ * `fetchCappedJson`, which stops counting bytes at the cap rather than parsing
+ * whatever arrives, and at most `MEDIA_DOWNLOADS_IN_FLIGHT` downloads run at once
+ * in this process (`withMediaSlot`).
  */
 
 /** How long a signed media URL works. Well under the 15 minutes asked of it. */
 export const MEDIA_URL_TTL_SECONDS = 10 * 60
+
+/** Downloads one process runs at once; more are refused with 429, never queued. */
+const MEDIA_DOWNLOADS_IN_FLIGHT = 3
 
 /** Image types every MCP client renders. Anything else goes back as an embedded file. */
 const INLINE_IMAGE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
@@ -53,12 +63,6 @@ function positiveNumber(raw: unknown, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback
 }
 
-export function formatMediaBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
 /** One downloaded file. */
 export interface MediaFile {
   data: Buffer
@@ -89,11 +93,16 @@ export function cleanMimeType(raw: unknown): string {
     : 'application/octet-stream'
 }
 
-/** A sender-chosen file name, reduced to something that cannot carry a path or a control character. */
+/**
+ * A sender-chosen file name, reduced to something that cannot carry a path or a
+ * control character. Made well-formed and clipped by code point, never by UTF-16
+ * unit: a split surrogate pair makes `encodeURIComponent` throw.
+ */
 export function cleanFileName(raw: unknown): string | undefined {
   if (typeof raw !== 'string') return undefined
+  const wellFormed = (raw as string & { toWellFormed(): string }).toWellFormed()
   // eslint-disable-next-line no-control-regex
-  const name = raw.replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim().slice(0, 200)
+  const name = Array.from(wellFormed.replace(/[\u0000-\u001f\u007f/\\]/g, '_').trim()).slice(0, 200).join('')
   return name && name !== '.' && name !== '..' ? name : undefined
 }
 
@@ -109,7 +118,7 @@ export function mediaInlineResult(meta: Record<string, unknown>, file: MediaFile
       {
         type: 'resource' as const,
         resource: {
-          uri: `media:///${encodeURIComponent(file.fileName ?? 'file')}`,
+          uri: `media:///${rfc5987(file.fileName ?? 'file')}`,
           mimeType: file.mimeType,
           blob: file.data.toString('base64'),
         },
@@ -129,9 +138,111 @@ export function mediaUrlResult(meta: Record<string, unknown>, url: string, expir
         url,
         expiresAt: expiresAt.toISOString(),
         howToFetch: 'GET the url with the same Authorization: Bearer header as this MCP connection, '
-          + 'before expiresAt. It works only for this connector token.',
+          + 'before expiresAt. It works only for this connector token, and not for a client that '
+          + 'puts the token in the URL path; such a client should ask for delivery: "inline".',
       }, null, 2),
     }],
+  }
+}
+
+/** Refusal when a file needs a URL and this deployment cannot make one. */
+export function signedUrlUnavailable(size: number | undefined, inlineMax: number) {
+  console.error('[media] signed URL unavailable: NUXT_PUBLIC_APP_URL is not set')
+  return createError({
+    statusCode: 501,
+    message: (size !== undefined ? `This file is ${formatBytes(size)}, over the ${formatBytes(inlineMax)} returned inline, and ` : '')
+      + 'this server cannot issue download links (its operator has not set NUXT_PUBLIC_APP_URL).',
+  })
+}
+
+// ── bounded work ─────────────────────────────────────────────────────────────
+
+let inFlight = 0
+
+/**
+ * Run one download in one of this process's few media slots, or refuse with
+ * 429. Each download holds a file several times over while it is decoded, so the
+ * number in flight is what bounds memory, whatever the per-minute budgets allow.
+ */
+export async function withMediaSlot<T>(work: () => Promise<T>): Promise<T> {
+  if (inFlight >= MEDIA_DOWNLOADS_IN_FLIGHT) {
+    throw createError({
+      statusCode: 429,
+      message: 'Too many file downloads are in progress on this server. Try again in a few seconds.',
+    })
+  }
+  inFlight++
+  try {
+    return await work()
+  }
+  finally {
+    inFlight--
+  }
+}
+
+/**
+ * The JSON body that carries a file of at most `maxBytes`, base64-encoded, plus
+ * room for the fields around it. Anything longer cannot be within the cap.
+ */
+export function cappedBodyBytes(maxBytes: number): number {
+  return Math.ceil(maxBytes / 3) * 4 + 256 * 1024
+}
+
+/** Shape of an HTTP failure as `httpStatusOf` and `relayBridgeError` read it (like ofetch's). */
+export class MediaFetchError extends Error {
+  constructor(public status: number, public data: unknown) {
+    super(`media fetch answered ${status}`)
+    this.name = 'MediaFetchError'
+  }
+}
+
+/**
+ * GET or POST through an ofetch client and parse the JSON answer, never reading
+ * more than `maxBodyBytes` of it: the count stops the stream before anything is
+ * parsed, so an oversized answer costs at most the cap, not its own size. An
+ * error answer is read up to 64 KiB and thrown as `MediaFetchError`, carrying
+ * the status and parsed body the callers' error mapping expects.
+ */
+export async function fetchCappedJson<T>(
+  client: typeof $fetch,
+  url: string,
+  options: Record<string, unknown>,
+  maxBodyBytes: number,
+): Promise<T> {
+  const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
+  const stream = response._data as ReadableStream<Uint8Array> | undefined
+  const limit = response.ok ? maxBodyBytes : 64 * 1024
+  const text = stream ? await readCapped(stream, limit) : ''
+  if (!response.ok) throw new MediaFetchError(response.status, safeJson(text))
+  return JSON.parse(text) as T
+}
+
+async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Promise<string> {
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > limit) {
+      await reader.cancel().catch(() => {})
+      throw createError({
+        statusCode: 413,
+        message: `This file is larger than the ${formatBytes(Math.floor((limit - 256 * 1024) * 3 / 4))} this connector fetches.`,
+      })
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+function safeJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  }
+  catch {
+    return undefined
   }
 }
 
@@ -154,57 +265,56 @@ export interface MediaRef {
   e: number
 }
 
-/**
- * The signing key, derived from `NUXT_WEBHOOK_SECRET` under a label of its own,
- * so a value signed here can never pass as anything the webhook secret
- * authenticates, and no new secret has to be provisioned. Undefined when the
- * secret is unset; signed URLs are then unavailable and the tools say so.
- */
-function signingKey(): Buffer | undefined {
-  const secret = String(useRuntimeConfig().webhookSecret ?? '')
-  if (!secret) return undefined
-  return createHmac('sha256', secret).update('automata:media-url:v1').digest()
-}
+/** Used when NUXT_MEDIA_URL_SECRET is unset: links then die with the process. */
+const processKey = randomBytes(32)
 
-function mac(key: Buffer, payload: string): Buffer {
-  return createHmac('sha256', key).update(payload).digest()
+/**
+ * The key that seals media URLs. From `NUXT_MEDIA_URL_SECRET` when set (needed
+ * for links to survive a restart or work across replicas), else a random key
+ * per process. Never derived from the webhook secret: that one is handed to
+ * every Evolution server and bridge, bring-your-own ones included.
+ */
+function sealingKey(): Buffer {
+  const secret = String(useRuntimeConfig().mediaUrlSecret ?? '')
+  return secret ? createHmac('sha256', secret).update('automata:media-url:v1').digest() : processKey
 }
 
 /**
  * An absolute signed URL for one message's media, or undefined when this
- * deployment cannot mint one (no webhook secret, or no public app URL to put in
- * front of it).
+ * deployment has no public app URL to put in front of it.
+ *
+ * The claim is **encrypted**, not only signed (AES-256-GCM): the chat id is a
+ * phone number, and proxies log paths this app cannot redact.
  */
 export function signMediaUrl(ref: Omit<MediaRef, 'v' | 'e'>, now = Date.now()): { url: string, expiresAt: Date } | undefined {
-  const key = signingKey()
   const appUrl = String(useRuntimeConfig().public.appUrl ?? '').trim().replace(/\/+$/, '')
-  if (!key || !appUrl) return undefined
+  if (!appUrl) return undefined
 
   const expiresAt = new Date(now + MEDIA_URL_TTL_SECONDS * 1000)
   const full: MediaRef = { v: 1, ...ref, e: Math.floor(expiresAt.getTime() / 1000) }
-  const payload = Buffer.from(JSON.stringify(full)).toString('base64url')
-  const signature = mac(key, payload).toString('base64url')
-  return { url: `${appUrl}${MEDIA_ROUTE_PREFIX}${payload}.${signature}`, expiresAt }
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', sealingKey(), iv)
+  const sealed = Buffer.concat([cipher.update(JSON.stringify(full), 'utf8'), cipher.final()])
+  const blob = Buffer.concat([iv, sealed, cipher.getAuthTag()]).toString('base64url')
+  return { url: `${appUrl}${MEDIA_ROUTE_PREFIX}${blob}`, expiresAt }
 }
 
 export type MediaRefCheck =
   | { ok: true, ref: MediaRef }
   | { ok: false, reason: 'invalid' | 'expired' }
 
-/** Verify a signed blob: signature first (constant time), then shape, then expiry. */
+/** Open a sealed blob: authenticated decryption, then shape, then expiry. */
 export function verifyMediaRef(blob: string | undefined, now = Date.now()): MediaRefCheck {
-  const key = signingKey()
-  if (!key || !blob || blob.length > 2048) return { ok: false, reason: 'invalid' }
-  const dot = blob.lastIndexOf('.')
-  if (dot <= 0) return { ok: false, reason: 'invalid' }
-  const payload = blob.slice(0, dot)
-  const given = Buffer.from(blob.slice(dot + 1), 'base64url')
-  const expected = mac(key, payload)
-  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return { ok: false, reason: 'invalid' }
+  if (!blob || blob.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(blob)) return { ok: false, reason: 'invalid' }
+  const raw = Buffer.from(blob, 'base64url')
+  if (raw.length < 12 + 16 + 2) return { ok: false, reason: 'invalid' }
 
   let ref: MediaRef
   try {
-    ref = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as MediaRef
+    const decipher = createDecipheriv('aes-256-gcm', sealingKey(), raw.subarray(0, 12))
+    decipher.setAuthTag(raw.subarray(raw.length - 16))
+    const plain = Buffer.concat([decipher.update(raw.subarray(12, raw.length - 16)), decipher.final()])
+    ref = JSON.parse(plain.toString('utf8')) as MediaRef
   }
   catch {
     return { ok: false, reason: 'invalid' }
@@ -218,19 +328,14 @@ export function verifyMediaRef(blob: string | undefined, now = Date.now()): Medi
   return { ok: true, ref }
 }
 
-/** Refusal when a file needs a URL and this deployment cannot sign one. */
-export function signedUrlUnavailable(size: number | undefined, inlineMax: number) {
-  console.error('[media] signed URL unavailable: NUXT_WEBHOOK_SECRET or NUXT_PUBLIC_APP_URL is not set')
-  return createError({
-    statusCode: 501,
-    message: (size !== undefined ? `This file is ${formatMediaBytes(size)}, over the ${formatMediaBytes(inlineMax)} returned inline, and ` : '')
-      + 'this server cannot issue download links (its operator has not set NUXT_WEBHOOK_SECRET and NUXT_PUBLIC_APP_URL).',
-  })
-}
-
 /** `Content-Disposition` for a download, with the name in both plain and RFC 5987 form. */
 export function attachmentDisposition(fileName: string | undefined): string {
   if (!fileName) return 'attachment'
   const ascii = fileName.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_')
-  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${rfc5987(fileName)}`
+}
+
+/** `encodeURIComponent` plus the four characters RFC 5987 does not allow bare. */
+function rfc5987(value: string): string {
+  return encodeURIComponent(value).replace(/['()*!]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
 }
