@@ -21,7 +21,7 @@ const known = computed(() => Boolean(props.token))
 
 <template>
   <Dialog :open="open" @update:open="value => emit('update:open', value)">
-    <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+    <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-xl">
       <DialogHeader>
         <DialogTitle>
           {{ label ? `How to connect “${label}”` : 'How to connect' }}

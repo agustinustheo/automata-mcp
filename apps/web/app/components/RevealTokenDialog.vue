@@ -14,7 +14,7 @@ const open = computed({
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="max-h-[85vh] overflow-x-hidden overflow-y-auto sm:max-w-lg">
+    <DialogContent class="max-h-[85vh] overflow-x-hidden overflow-y-auto sm:max-w-xl">
       <DialogHeader>
         <DialogTitle>Your connector token</DialogTitle>
         <DialogDescription>
