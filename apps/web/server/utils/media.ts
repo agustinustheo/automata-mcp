@@ -177,8 +177,9 @@ export function signedUrlUnavailable(inlineMax: number, over?: { size?: number }
   console.error('[media] signed URL unavailable: NUXT_PUBLIC_APP_URL is not set')
   return createError({
     statusCode: 501,
-    message: (over ? `This file is ${over.size !== undefined ? `about ${formatBytes(over.size)}, ` : ''}over the ${formatBytes(inlineMax)} returned inline, and ` : '')
-      + 'this server cannot issue download links (its operator has not set NUXT_PUBLIC_APP_URL).',
+    message: over
+      ? `This file is ${over.size !== undefined ? `about ${formatBytes(over.size)}, ` : ''}over the ${formatBytes(inlineMax)} returned inline, and this server cannot issue download links (its operator has not set NUXT_PUBLIC_APP_URL).`
+      : 'This server cannot issue download links (its operator has not set NUXT_PUBLIC_APP_URL).',
   })
 }
 
