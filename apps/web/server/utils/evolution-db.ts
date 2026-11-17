@@ -578,7 +578,7 @@ export interface MessageSearchHit {
    * to pay for. `pushName` is never an answer on its own; see `authorName` in
    * `mentions.ts`.
    */
-  sender: { identity?: string, pushName?: string }
+  sender: MessageSender
   timestamp?: string
   type?: string
   text: string
@@ -1509,19 +1509,68 @@ function bestNamed(sql: Sql) {
 }
 
 /**
+ * Who sent a message, unresolved.
+ *
+ * `identity` is what the name directory is asked about (it is keyed on the local
+ * part, so either addressing form resolves). `id` is a stable handle for a group
+ * message's sender, for the caller to show when no name resolves: without it, a
+ * group page of unnamed senders reads as one anonymous voice (#263). It is the
+ * LID's local part where one is known, since history rows only ever give us the
+ * LID, and the same person must not read as two between old and new messages.
+ */
+export interface MessageSender {
+  identity?: string
+  id?: string
+  pushName?: string
+}
+
+/**
  * The sender's identity as stored, preferring the group participant.
  *
- * Baileys writes `participant` for a group message on both the live and the
- * history path, and `participantAlt` — the same person's other addressing form —
- * only on the live one. Either resolves, because the directory is keyed on the
- * local part. For a 1:1 chat there is no participant and the chat's own JID *is*
- * the sender, which is why `remoteJid` is the fallback rather than nothing.
+ * Baileys writes `participant` for a group message on the live path, and
+ * `participantAlt` — the same person's other addressing form — beside it. For a
+ * 1:1 chat there is no participant and the chat's own JID *is* the sender, which
+ * is why `remoteJid` is the fallback there.
+ *
+ * **Never for a group.** History-imported group rows often arrive with no
+ * `participant` at all (measured on prod: most accounts' imports, before and
+ * after the evolution-api-reforged switch). Falling back to `remoteJid` there
+ * named the *group* as the sender of every such message. What those rows do
+ * carry is a numeric `pushName`: the sender's LID local part (matched against
+ * live rows' participants in tens of thousands of rows, against a phone local
+ * part in a few dozen). So it is read as the sender's identity — never as a name
+ * — and the directory turns it into one where it can. `@lid` on the recovered
+ * identity is a lookup key, not a claim: the directory matches on digits alone.
  */
-export function senderOf(row: { key: MessageKey | null, pushName: string | null }): { identity?: string, pushName?: string } {
-  return {
-    identity: row.key?.participant ?? row.key?.participantAlt ?? row.key?.remoteJid,
-    pushName: row.pushName ?? undefined,
+export function senderOf(row: { key: MessageKey | null, pushName: string | null }): MessageSender {
+  const { participant, participantAlt, remoteJid } = row.key ?? {}
+  const pushName = row.pushName ?? undefined
+
+  const stated = participant || participantAlt
+  if (stated) {
+    const lid = [participant, participantAlt].find(jid => jid?.endsWith('@lid'))
+    return { identity: stated, id: localPart(lid ?? stated), pushName }
   }
+
+  if (remoteJid?.endsWith('@g.us')) {
+    const recovered = identityFromPushName(pushName)
+    return recovered
+      ? { identity: recovered, id: localPart(recovered) }
+      : { pushName }
+  }
+
+  return { identity: remoteJid, pushName }
+}
+
+/** A bare LID, or a LID JID, standing where a push name should be. */
+function identityFromPushName(pushName: string | undefined): string | undefined {
+  const digits = pushName?.trim().match(/^(\d{6,20})(?:@lid)?$/)?.[1]
+  return digits ? `${digits}@lid` : undefined
+}
+
+/** Local part without a device suffix (`123:4@lid` → `123`), so one person reads as one id. */
+function localPart(jid: string): string {
+  return jid.split('@')[0]?.split(':')[0] ?? ''
 }
 
 /**
