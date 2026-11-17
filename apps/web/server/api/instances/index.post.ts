@@ -48,13 +48,14 @@ const body = z.discriminatedUnion('kind', [
       dbUrl: z.string().min(1).max(2000).optional(),
     }).optional(),
   }),
-  // A mailbox. No plaintext option: `starttls` must upgrade or it fails.
+  // A mailbox. `starttls` must upgrade or it fails; `none` is plaintext, by
+  // the owner's explicit choice.
   z.object({
     kind: z.literal('imap'),
     label: z.string().max(100).optional(),
     host: z.string().trim().min(1).max(253),
     port: z.number().int().min(1).max(65535),
-    security: z.enum(['tls', 'starttls']),
+    security: z.enum(['tls', 'starttls', 'none']),
     user: z.string().trim().min(1).max(320),
     password: z.string().min(1).max(1000),
   }),

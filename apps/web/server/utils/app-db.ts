@@ -382,7 +382,7 @@ export interface AppInstance {
    */
   imap_host?: string
   imap_port?: number
-  imap_security?: '' | 'tls' | 'starttls'
+  imap_security?: '' | 'tls' | 'starttls' | 'none'
   imap_user?: string
   imap_password?: string
   label?: string
