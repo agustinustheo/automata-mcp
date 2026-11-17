@@ -15,8 +15,11 @@
  * No imports, so it can be exercised in plain Node, like `token-bucket.ts`.
  *
  * Assumptions, refused loudly when broken (`Base64FieldError`, reason
- * `malformed`): the field occurs once, at a point where `"<field>":"` cannot be
- * part of a string (a key); its value is padded base64 in whole groups of four
+ * `malformed`): a flat object, the field occurring once — a second `"<field>":"`
+ * key anywhere after it is refused; one nested *before* the real field with
+ * none after it cannot be told apart and is read (no supported Evolution
+ * answers that way, and a hostile server could send any bytes anyway) — at a
+ * point where `"<field>":"` cannot be part of a string (a key); its value is padded base64 in whole groups of four
  * (`=` only at the end), with `\/` as the only escape (JSON's optional one);
  * the rest of the object stays under `maxOther` bytes. Past `maxDecoded`
  * decoded bytes: reason `too-large`.
@@ -84,15 +87,21 @@ export class Base64FieldReader {
         this.finishValue()
         this.inside = false
         this.keep(bytes.subarray(close, close + 1))
+        // The tail still holds this field's own key; looking for a second one
+        // starts after it.
+        this.tail = ''
         at = close + 1
         continue
       }
+      const text = this.tail + bytes.toString('latin1', at)
+      const match = this.marker.exec(text)
       if (this.found) {
+        // The field once only: a second one (or a nested one before it) is not
+        // an answer this reader can trust to have read the right file from.
+        if (match) throw new Base64FieldError('malformed', 'The answer carries the file field more than once.')
         this.keep(bytes.subarray(at))
         return
       }
-      const text = this.tail + bytes.toString('latin1', at)
-      const match = this.marker.exec(text)
       if (!match) {
         this.keep(bytes.subarray(at))
         return

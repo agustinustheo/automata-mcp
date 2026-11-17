@@ -15,20 +15,23 @@ import '#nuxt-mcp-toolkit/tools.mjs'
  * granted, the per-minute budgets, the chat in scope, the message in that chat.
  * Only then is the file fetched, fresh; nothing was stored when the URL was made.
  *
- * Anything that does not match answers 404, saying no more about a URL than
- * that it leads nowhere — except an expired one followed with its own token,
- * which says so (410), since "call the tool again" is the useful answer then.
- * Without that token an expired link is a 404 like any other.
+ * No usable token = 401, before the link is opened. Anything that does not
+ * match answers 404, saying no more about a URL than that it leads nowhere —
+ * except an expired one followed with its own token, which says so (410), since
+ * "call the tool again" is the useful answer then.
  */
 export default defineEventHandler(async (event) => {
+  // The token first, before the link is even opened: a request without a usable
+  // token gets 401 whatever the link is — genuine, expired or made up — so a
+  // sealed URL held without its token cannot tell which. A valid token of
+  // anyone else gets 404 for every link; only the link's own token learns that
+  // it expired (410).
+  const auth = await resolveMcpAuth(event)
+  if (!auth) return mcpUnauthorized()
+
   const check = verifyMediaRef(getRouterParam(event, 'blob'))
   if (!check.ok && check.reason === 'invalid') throw createError({ statusCode: 404, statusMessage: 'Not Found' })
   const { ref } = check
-
-  // Expired or not, a link says nothing until its own token is shown: 404 to
-  // anyone else, so a sealed URL without the token cannot even tell it was real.
-  const auth = await resolveMcpAuth(event)
-  if (!auth) return mcpUnauthorized()
   if (auth.tokenId !== ref.t || auth.instance.id !== ref.i || auth.kind !== ref.k) {
     throw createError({ statusCode: 404, statusMessage: 'Not Found' })
   }

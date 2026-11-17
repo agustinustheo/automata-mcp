@@ -644,7 +644,7 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   under `/mcp-media/` instead: signed, valid ten minutes, and followed only with
   the **same** connector token in the `Authorization` header, after the same
   scope checks run again. It holds no bytes; following it downloads the file
-  then. Larger files are refused with their size. The link needs a client that can send that header: one that puts the token in
+  then. Larger files are refused, quoting the size when it is known. The link needs a client that can send that header: one that puts the token in
   the URL path (`/mcp/<token>`) cannot follow it and should ask for
   `delivery: "inline"`. Links need `NUXT_PUBLIC_APP_URL`; they are sealed with
   `NUXT_MEDIA_URL_SECRET`, or a random key per process when it is unset (links
@@ -665,9 +665,12 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   the app sends, so there the check is skipped.
 - **Not downloadable:** view-once media; a message whose file reference does
   not point at WhatsApp's media servers (the stored message is the sender's, and
-  Evolution would fetch whatever address it names — refused with 422); and old
-  media WhatsApp no longer holds — Evolution asks the phone to re-upload expired
-  media, which works only while the phone is online and still has it.
+  Evolution would fetch whatever address it names — refused with 422); on
+  evolution-api-reforged, a wrapped message (an album item, an edited or a
+  disappearing-chat message: it reloads the stored row by id and does not unwrap
+  it, where stock 2.3.7 downloads the unwrapped node the app sends — 422); and
+  old media WhatsApp no longer holds — Evolution asks the phone to re-upload
+  expired media, which works only while the phone is online and still has it.
 
 ## Chats addressed by LID (`…@lid`)
 

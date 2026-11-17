@@ -103,6 +103,11 @@ async function assertIdNotShared(auth: WhatsappAuth, row: StoredMessage): Promis
   }
 }
 
+/** A handled error for a caller that went away: Nitro neither logs it nor anyone reads it. */
+function callerGone() {
+  return createError({ statusCode: 499, statusMessage: 'Client Closed Request' })
+}
+
 /** Longest the post-download repeated-id check may hold the file and its slot. */
 const ID_RECHECK_DEADLINE_MS = 10_000
 
@@ -111,8 +116,8 @@ async function idRecheck(work: Promise<void>): Promise<void> {
   work.catch(() => {})
   try {
     await withDeadline(new Promise<void>((resolve, reject) => {
-      if (signal.aborted) return reject(signal.reason)
-      const onAbort = () => reject(signal.reason)
+      if (signal.aborted) return reject(callerGone())
+      const onAbort = () => reject(callerGone())
       signal.addEventListener('abort', onAbort, { once: true })
       work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
     }), ID_RECHECK_DEADLINE_MS, 'repeated message id re-check')
@@ -286,10 +291,13 @@ export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMed
   }
   catch (error) {
     const status = httpStatusOf(error)
-    if (status === 413) throw error
+    // Our own cap (the reader's 413) passes through; a 413 Evolution itself
+    // answered (a proxy's body limit, say) is the server failing, below.
+    if (status === 413 && !(error instanceof MediaFetchError)) throw error
     // The caller hung up: nothing failed on Evolution's side, and nobody is
-    // waiting for an answer — not logged as a download failure.
-    if (requestAbortSignal().aborted) throw error
+    // waiting for an answer — not logged as a download failure, nor left to
+    // surface as an unhandled error.
+    if (requestAbortSignal().aborted) throw callerGone()
     console.error(`[media] WhatsApp download on connection ${auth.instance.id} failed: Evolution answered ${status ?? (error as Error | undefined)?.name ?? 'nothing'}`)
     const said = JSON.stringify((error as { data?: unknown } | undefined)?.data ?? '')
     if (status === 400 && /not of the media type/i.test(said)) {

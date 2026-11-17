@@ -177,7 +177,9 @@ and message `id`, through the bridge's `GET /sessions/:id/media`.
   while downloading, gives each download a deadline, stops it when the app
   disconnects, and runs at most two at once, one per account. A cancelled
   download's last Telegram request keeps its place among those two until it
-  has finished. If Telegram leaves it unanswered for 10 minutes, the bridge
+  has finished — so a link followed right after an `auto` download turned
+  out too large for inline can briefly get 429 for that account while the
+  cut-off request settles; try again a moment later. If Telegram leaves it unanswered for 10 minutes, the bridge
   disconnects that account's Telegram client, which ends the request, and
   reconnects the account; the place then comes back. A request still pending
   after that keeps its place and is logged as an error (restart the bridge).
