@@ -99,8 +99,8 @@ export default defineEventHandler(async (event) => {
         record(false)
         throw error
       }
-      headers(opened.meta.mimeType, opened.meta.fileName)
       try {
+        headers(opened.meta.mimeType, opened.meta.fileName)
         record(await pipeMediaToResponse(event, opened.body, opened.cap))
       }
       finally {

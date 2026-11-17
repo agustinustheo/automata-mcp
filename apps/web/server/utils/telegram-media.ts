@@ -98,8 +98,9 @@ export async function openTelegramMedia(
  * cap, so a cap given to it would end in a broken stream, not a 413. This way a
  * file over `maxBytes` whose size Telegram did not report is caught here — a
  * clean 413 that `auto` turns into a link — after at most one extra chunk. A
- * file Telegram reports as over the overall limit is refused by the bridge
- * before anything is sent, with its size.
+ * file whose reported size is over `maxBytes` is refused as soon as the bridge's
+ * headers arrive, and one over the overall limit by the bridge itself, both
+ * with the size.
  */
 export async function downloadTelegramMedia(
   auth: TelegramAuth,
@@ -110,6 +111,16 @@ export async function downloadTelegramMedia(
   return await withMediaSlot(async () => {
     const cap = Math.min(maxBytes, BRIDGE_MEDIA_MAX_BYTES)
     const { meta, body } = await openTelegramMedia(auth, chatId, messageId, Math.max(cap, mediaMaxBytes()), requestAbortSignal())
+    // The bridge's reported size (exact for a document) decides before a byte
+    // is read; the capped read below is the backstop when it is missing or short.
+    if (meta.size !== undefined && meta.size > cap) {
+      await body.cancel().catch(() => {})
+      throw createError({
+        statusCode: 413,
+        message: `This file is ${formatBytes(meta.size)}, larger than the ${formatBytes(cap)} this read accepts.`,
+        data: { size: meta.size },
+      })
+    }
     const data = await readStreamCapped(body, cap)
     return {
       meta: { ...meta, size: data.length },

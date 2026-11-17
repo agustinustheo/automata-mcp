@@ -7,9 +7,10 @@ import { z } from 'zod'
  * inline and larger ones by a signed URL only this token can follow.
  *
  * Telegram does not report a file's size in the synced row, so `auto` first
- * asks the bridge for the file capped at the inline limit: the bridge refuses
- * a larger one from Telegram's reported size before downloading (413), and the
- * answer is then a link, which fetches the file once, when followed.
+ * opens the file inline-capped: a reported size over the inline limit is
+ * refused as soon as the bridge's headers arrive (413, nothing read), one with
+ * no reported size after at most one chunk past it; the answer is then a link,
+ * which fetches the file when followed.
  */
 export default defineKindTool({
   name: 'download-telegram-media',

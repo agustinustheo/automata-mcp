@@ -19,7 +19,9 @@ import { z } from 'zod'
  * `mediaMaxBytes`, a URL valid for ten minutes that only this token can follow,
  * which re-runs every check here before fetching. Above that, refused with the
  * size. A size the sender did not give is found out by fetching capped at the
- * inline limit, so a large file is never downloaded twice.
+ * inline limit, so this process never buffers a large file whole twice (though
+ * Evolution, which always fetches the whole file, may do so again when the link
+ * is followed).
  */
 export default defineKindTool({
   name: 'download-media',
@@ -73,6 +75,11 @@ export default defineKindTool({
       return mediaUrlResult(described, signed.url, signed.expiresAt)
     }
 
+    // Too large for inline by the sender's own account: say so without fetching.
+    if (delivery === 'inline' && claimed !== undefined && claimed > inlineMax) {
+      throw inlineRefusal(claimed, inlineMax)
+    }
+
     // Known to be large, or the caller asked for a link: no download here — the
     // URL fetches it when followed.
     if (delivery === 'url' || (delivery === 'auto' && claimed !== undefined && claimed > inlineMax)) {
@@ -87,10 +94,19 @@ export default defineKindTool({
       file = await downloadWhatsappMedia(auth, target, inlineMax)
     }
     catch (error) {
-      if (httpStatusOf(error) !== 413 || delivery === 'inline') throw error
+      if (httpStatusOf(error) !== 413) throw error
+      if (delivery === 'inline') throw inlineRefusal(claimed, inlineMax)
       return link(meta, claimed)
     }
     const fetched = { ...meta, mimeType: file.mimeType, size: file.data.length, ...(file.fileName && { fileName: file.fileName }) }
     return mediaInlineResult(fetched, file)
   },
 })
+
+function inlineRefusal(size: number | undefined, inlineMax: number) {
+  return createError({
+    statusCode: 413,
+    message: `This file is ${size !== undefined ? `about ${formatBytes(size)}, ` : ''}over the ${formatBytes(inlineMax)} returned inline. `
+      + 'Call again with delivery: "url".',
+  })
+}
