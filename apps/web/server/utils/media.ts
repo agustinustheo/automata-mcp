@@ -1,4 +1,8 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto'
+import { Readable, Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
+import type { H3Event } from 'h3'
 import { assertNever } from '#shared/connection'
 
 /**
@@ -19,10 +23,12 @@ import { assertNever } from '#shared/connection'
  * is useless without the token; a token without a fresh URL can call the tool.
  *
  * **Memory is bounded before bytes are held.** A sender's reported size is a
- * claim, so every answer from Evolution or the bridge is read through
- * `fetchCappedJson`, which stops counting bytes at the cap rather than parsing
- * whatever arrives, and at most `MEDIA_DOWNLOADS_IN_FLIGHT` downloads run at once
- * in this process (`withMediaSlot`).
+ * claim, so Evolution's answer (one JSON body with the whole file as base64) is
+ * read through `fetchCappedJson`, which stops counting bytes at the cap rather
+ * than parsing whatever arrives; the bridge's answer is a byte stream, piped
+ * through (`pipeMediaToResponse`) or read capped for an inline result
+ * (`readStreamCapped`). At most `MEDIA_DOWNLOADS_IN_FLIGHT` downloads run at
+ * once in this process (`acquireMediaSlot`).
  */
 
 /** How long a signed media URL works. Well under the 15 minutes asked of it. */
@@ -214,68 +220,67 @@ export async function openMediaStream(
   return { headers: response.headers, body: stream }
 }
 
-/** A whole stream as one Buffer, refused with 413 the moment it passes `maxBytes`. For inline results only. */
-export async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<Buffer> {
+/**
+ * A whole stream as one Buffer, refused with 413 the moment it passes
+ * `maxBytes`. For inline results only.
+ *
+ * A source that stops mid-stream is an error, never a short file. When it stops
+ * within `cutWindow` bytes of the cap, it is read as the source enforcing the
+ * same cap (the bridge cuts its stream rather than overrun it when the size was
+ * not known up front) and answered 413, so `auto` can offer a link; anything
+ * earlier is a broken download (502).
+ */
+export async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number, cutWindow = 0): Promise<Buffer> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
+  const tooLarge = () => createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxBytes)} this connector fetches.` })
   for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    size += value.byteLength
+    let step: ReadableStreamReadResult<Uint8Array>
+    try {
+      step = await reader.read()
+    }
+    catch {
+      if (cutWindow > 0 && size >= maxBytes - cutWindow) throw tooLarge()
+      throw createError({ statusCode: 502, message: 'The download broke off before the whole file arrived. Try again.' })
+    }
+    if (step.done) break
+    size += step.value.byteLength
     if (size > maxBytes) {
       await reader.cancel().catch(() => {})
-      throw createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxBytes)} this connector fetches.` })
+      throw tooLarge()
     }
-    chunks.push(value)
+    chunks.push(step.value)
   }
   return Buffer.concat(chunks)
 }
 
 /**
- * Pass a stream through unchanged, chunk by chunk, counting bytes: past
- * `maxBytes` it errors (the response ends early and the client sees a broken
- * download, never a short file passed off as whole). `done` runs exactly once,
- * however the stream ends — finished, cut off, or cancelled by the client.
+ * Pipe a media stream to the HTTP response through `pipeline`, counting bytes:
+ * it waits on backpressure (a slow client never makes this process buffer the
+ * file), and past `maxBytes`, on a source failure, or when the client goes
+ * away, the response is destroyed — the client sees a broken download, never a
+ * short file passed off as whole. Answers whether the whole file went out.
+ * Headers must be set before calling.
  */
-export function cappedPassThrough(
-  source: ReadableStream<Uint8Array>,
-  maxBytes: number,
-  done: (ok: boolean) => void,
-): ReadableStream<Uint8Array> {
-  const reader = source.getReader()
+export async function pipeMediaToResponse(event: H3Event, body: ReadableStream<Uint8Array>, maxBytes: number): Promise<boolean> {
+  const res = event.node.res
   let size = 0
-  let settled = false
-  const finish = (ok: boolean) => {
-    if (!settled) {
-      settled = true
-      done(ok)
-    }
-  }
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const { done: end, value } = await reader.read()
-        if (end) {
-          controller.close()
-          finish(true)
-          return
-        }
-        size += value.byteLength
-        if (size > maxBytes) throw new Error(`media stream passed ${maxBytes} bytes`)
-        controller.enqueue(value)
-      }
-      catch (error) {
-        await reader.cancel().catch(() => {})
-        controller.error(error)
-        finish(false)
-      }
-    },
-    async cancel() {
-      await reader.cancel().catch(() => {})
-      finish(false)
+  const counter = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      size += chunk.length
+      if (size > maxBytes) callback(new Error(`media stream passed ${maxBytes} bytes`))
+      else callback(null, chunk)
     },
   })
+  try {
+    await pipeline(Readable.fromWeb(body as unknown as NodeReadableStream<Uint8Array>), counter, res)
+    return true
+  }
+  catch {
+    if (!res.writableEnded) res.destroy()
+    return false
+  }
 }
 
 /**

@@ -10,14 +10,16 @@ type TelegramAuth = Extract<McpAuth, { kind: 'telegram' }>
  *
  * **Streamed, never stored.** The bridge sends the file as raw bytes, chunk by
  * chunk, as it downloads them from Telegram. The signed-URL route pipes that
- * stream straight to the caller (`cappedPassThrough`), so no layer holds the
- * whole file. Only an inline tool result reads it into memory, because MCP
+ * stream straight to the caller (`pipeMediaToResponse`, with backpressure), so
+ * no layer holds the whole file. Only an inline tool result reads it into memory, because MCP
  * carries the file inside the JSON result; that read is capped at the inline
  * limit (5 MiB by default).
  */
 
 /** The bridge's own ceiling on one download (`MEDIA_MAX_BYTES` in apps/telegram-bridge/src/http.ts). */
 const BRIDGE_MEDIA_MAX_BYTES = 50 * 1024 * 1024
+/** The bridge's download chunk (`requestSize` in its `media`): how far short of the cap it may cut. */
+const BRIDGE_CHUNK_BYTES = 512 * 1024
 
 /**
  * The synced message's media kind, or a loud refusal: 404 when no such
@@ -101,7 +103,7 @@ export async function downloadTelegramMedia(
 ): Promise<{ meta: MediaMeta, file: MediaFile }> {
   return await withMediaSlot(async () => {
     const { meta, body, cap } = await openTelegramMedia(auth, chatId, messageId, maxBytes, requestAbortSignal())
-    const data = await readStreamCapped(body, cap)
+    const data = await readStreamCapped(body, cap, BRIDGE_CHUNK_BYTES)
     return {
       meta: { ...meta, size: data.length },
       file: { data, mimeType: meta.mimeType, ...(meta.fileName && { fileName: meta.fileName }) },
