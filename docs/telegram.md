@@ -175,7 +175,9 @@ and message `id`, through the bridge's `GET /sessions/:id/media`.
   that only the same token can follow. The bridge also refuses anything over
   50 MiB, checked from the size Telegram reports before downloading and again
   while downloading, gives each download a deadline, stops it when the app
-  disconnects, and runs at most two at once.
+  disconnects, and runs at most two at once, one per account. A cancelled
+  download's last Telegram request keeps its place among those two until
+  Telegram has answered it.
 - **Not downloadable:** self-destructing media, and anything while the account
   is not online (`get-telegram-status`).
 - **A link download must finish within 90 seconds** (the app's deadline on the

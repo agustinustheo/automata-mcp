@@ -108,7 +108,7 @@ export async function downloadTelegramMedia(
   messageId: number,
   maxBytes: number,
 ): Promise<{ meta: MediaMeta, file: MediaFile }> {
-  return await withMediaSlot(async () => {
+  return await withMediaSlot(auth.instance.id, async () => {
     const cap = Math.min(maxBytes, BRIDGE_MEDIA_MAX_BYTES)
     const { meta, body } = await openTelegramMedia(auth, chatId, messageId, Math.max(cap, mediaMaxBytes()), requestAbortSignal())
     // The bridge's reported size (exact for a document) decides before a byte

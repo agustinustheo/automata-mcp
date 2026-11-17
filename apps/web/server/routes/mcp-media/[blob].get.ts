@@ -1,3 +1,9 @@
+// Tool modules register their kinds and costs as they load (`defineKindTool`);
+// `isToolAllowed` and `chargesFor` read those. This route is not `/mcp`, so on a
+// fresh process the first followed link could arrive before anything loaded
+// them: load them here too, as `mcp-tools.get.ts` does.
+import '#nuxt-mcp-toolkit/tools.mjs'
+
 /**
  * Follow a signed media URL minted by `download-media` / `download-telegram-media`.
  *
@@ -62,23 +68,33 @@ export default defineEventHandler(async (event) => {
 
   switch (auth.kind) {
     // One bounded buffer: Evolution's only media route answers with the whole
-    // file as base64 in a JSON body, so there is no stream to pass on.
+    // file as base64 in a JSON body, so there is no stream to pass on. The slot
+    // is held until that buffer has been delivered (or the delivery deadline
+    // cut it off), so the slots bound the files held, not just the downloads.
     case 'whatsapp': {
+      let release: (() => void) | undefined
       let file: MediaFile
       try {
         const target = await findWhatsappMedia(auth, ref.c, ref.m)
         if (target.meta.size !== undefined && target.meta.size > maxBytes) {
           throw createError({ statusCode: 413, statusMessage: 'File larger than this connector fetches.' })
         }
-        file = await downloadWhatsappMedia(auth, target, maxBytes)
+        release = acquireMediaSlot(auth.instance.id)
+        file = await fetchWhatsappMedia(auth, target, maxBytes)
       }
       catch (error) {
+        release?.()
         record(false)
         throw error
       }
-      record(true)
-      headers(file.mimeType, file.fileName, file.data.length)
-      return file.data
+      try {
+        headers(file.mimeType, file.fileName, file.data.length)
+        record(await pipeMediaToResponse(event, file.data, maxBytes))
+      }
+      finally {
+        release()
+      }
+      return
     }
 
     // Streamed straight through from the bridge: one media slot held until the
@@ -91,7 +107,7 @@ export default defineEventHandler(async (event) => {
       try {
         assertChatAllowed(auth.scope, ref.c)
         await findTelegramMedia(auth, ref.c, messageId)
-        release = acquireMediaSlot()
+        release = acquireMediaSlot(auth.instance.id)
         opened = await openTelegramMedia(auth, ref.c, messageId, maxBytes, requestAbortSignal())
       }
       catch (error) {
@@ -100,7 +116,9 @@ export default defineEventHandler(async (event) => {
         throw error
       }
       try {
-        headers(opened.meta.mimeType, opened.meta.fileName)
+        // The bridge reports a size only when it is exact (a document's, or the
+        // photo size it downloads) and fails a stream that ends short of it.
+        headers(opened.meta.mimeType, opened.meta.fileName, opened.meta.size)
         record(await pipeMediaToResponse(event, opened.body, opened.cap))
       }
       finally {
