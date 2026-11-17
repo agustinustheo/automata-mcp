@@ -111,6 +111,7 @@ comes back.
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
 | `search-telegram-messages` | Telegram | read | Messages containing every word of `query` (text and captions), across chats in scope or one `chatId` |
 | `send-telegram-message` | Telegram | **write** | Send plain text (≤ 4096 chars) to exactly one of `chatId` or `username` — an @username, a t.me link or a phone number |
+| `download-telegram-media` | Telegram | read, **opt-in** | The file a message carries — photo, video, video note, voice, audio, sticker, document — by `chatId` and message `id` from `read-telegram-messages` (messages with a file carry `media`); same delivery as `download-media`: up to 5 MiB inline, up to 25 MiB as a 10-minute link only the same token can follow; ticked separately |
 | `get-mailbox-status` | Email | read | Which mailbox, whether its sync works, when it last ran, and which folders are still backfilling |
 | `list-mail-folders` | Email | read | Folders in scope with synced and unread counts; skipped folders (All Mail, Junk, Trash) marked `synced: false` |
 | `list-emails` | Email | read | Headers newest first from one folder or all in scope, 1–100 per page (default 25); filters for date, unread, flagged, attachments |
@@ -160,7 +161,7 @@ the connection's dashboard. Which axes appear depends on the kind:
   request, so a tool outside scope is not merely hidden from the tool list:
   calling it fails. A new Postgres or Email token starts read-only — the read
   tools ticked, `run-statement` or `create-email-draft` not. **Media downloads**
-  (`download-media`) are opt-in: never included in "All actions", so no token
+  (`download-media`, `download-telegram-media`) are opt-in: never included in "All actions", so no token
   gains them on an upgrade; tick them under *Media downloads* in either mode.
 - **Chats** (WhatsApp and Telegram) — all conversations, or an allowlist. `list-chats` returns
   only allowed conversations; `read-messages` and `send-text-message` refuse
