@@ -244,6 +244,9 @@ export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMed
   catch (error) {
     const status = httpStatusOf(error)
     if (status === 413) throw error
+    // The caller hung up: nothing failed on Evolution's side, and nobody is
+    // waiting for an answer — not logged as a download failure.
+    if (requestAbortSignal().aborted) throw error
     console.error(`[media] WhatsApp download on connection ${auth.instance.id} failed: Evolution answered ${status ?? (error as Error | undefined)?.name ?? 'nothing'}`)
     const said = JSON.stringify((error as { data?: unknown } | undefined)?.data ?? '')
     if (status === 400 && /not of the media type/i.test(said)) {
