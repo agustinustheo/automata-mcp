@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Upstream sync for the bitsentry fork of Automata, run on demand by
-# .github/workflows/bitsentry-sync.yml (workflow_dispatch; scheduled from Grok Bot).
+# .github/workflows/bitsentry-sync.yml on a GitHub-hosted runner (workflow_dispatch;
+# scheduled from Grok Bot).
 #
 #   1. fetch ju-li/automata-mcp main; fast-forward our main (an exact mirror)
 #   2. merge main into bitsentry/build
@@ -9,9 +10,10 @@
 #      tag the next v<version>-bitsentry.N and push the tag -> bitsentry-deploy.yml
 #
 # Conflict, failed check, or a main that no longer fast-forwards: nothing is
-# pushed, the job fails, and GitHub mails the workflow's owner. Work happens in
-# a fresh clone over the deploy key (GITHUB_TOKEN may not push workflow files,
-# and upstream's commits touch them).
+# pushed, the job fails, and GitHub mails the person who triggered it. Work
+# happens in a fresh clone over the deploy key (GITHUB_TOKEN may not push
+# workflow files, and upstream's commits touch them; a tag it pushed would not
+# trigger the deploy either).
 set -euo pipefail
 
 FORK=git@github-automata:agustinustheo/automata-mcp.git

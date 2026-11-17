@@ -4,9 +4,11 @@
 #   deploy/bitsentry/deploy.sh v1.3.2-bitsentry.1
 #
 # Run by .github/workflows/bitsentry-deploy.yml on the self-hosted runner, from
-# a checkout of the tag. Never run by hand once the workflow works.
+# a checkout of the tag, after the workflow built the images on GitHub-hosted
+# runners and logged this job in to GHCR with its read-only package token.
+# Nothing is built on this server. Never run by hand once the workflow works.
 #
-#   1. build   web + telegram-bridge images from this checkout (nothing changes yet)
+#   1. pull    the release's web + telegram-bridge images from GHCR (nothing changes yet)
 #   2. backup  pg_dump of the automata database, the WhatsApp session volume,
 #              and the compose files in /opt/automata
 #   3. install docker-compose.yml from the tag, our override, and a release file
@@ -16,7 +18,7 @@
 #   5. on any failure after step 3: stop, restore the database and the previous
 #              compose files, start the previous images, health-check again, fail
 #
-# Reusable for the Odoo MCP fork later: the shape (build -> backup -> install ->
+# Reusable for the Odoo MCP fork later: the shape (pull -> backup -> install ->
 # health -> rollback) and the state/backup layout stay; APP_DIR, images, the DB
 # step and the health probes are what change.
 set -euo pipefail
@@ -30,8 +32,12 @@ BACKUP_ROOT=/opt/deploy-backups/automata
 KEEP_BACKUPS=5
 PG_CONTAINER=postgres-postgres-1
 DB=automata
-WEB_IMAGE="local/automata-web:${TAG}"
-BRIDGE_IMAGE="local/automata-bridge:${TAG}"
+REGISTRY="${REGISTRY:-ghcr.io/agustinustheo}"
+WEB_REPO="$REGISTRY/automata-mcp-web"
+BRIDGE_REPO="$REGISTRY/automata-mcp-telegram-bridge"
+WEB_IMAGE="$WEB_REPO:${TAG}"
+BRIDGE_IMAGE="$BRIDGE_REPO:${TAG}"
+KEEP_IMAGE_TAGS=3
 HEALTH_TIMEOUT=240
 SRC="$(git rev-parse --show-toplevel)"
 
@@ -48,10 +54,10 @@ if [ "$CURRENT" = "$TAG" ]; then
 fi
 grep -q '^COMPOSE_FILE=' "$APP_DIR/.env" || { echo "COMPOSE_FILE is not set in $APP_DIR/.env (see deploy/bitsentry/README.md)" >&2; exit 2; }
 
-# ── 1. build ─────────────────────────────────────────────────────────────────
-log "building $WEB_IMAGE and $BRIDGE_IMAGE"
-docker build --pull -q -f "$SRC/apps/web/Dockerfile" -t "$WEB_IMAGE" "$SRC" >/dev/null
-docker build --pull -q -f "$SRC/apps/telegram-bridge/Dockerfile" -t "$BRIDGE_IMAGE" "$SRC" >/dev/null
+# ── 1. pull ──────────────────────────────────────────────────────────────────
+log "pulling $WEB_IMAGE and $BRIDGE_IMAGE"
+docker pull -q "$WEB_IMAGE" >/dev/null
+docker pull -q "$BRIDGE_IMAGE" >/dev/null
 
 # ── 2. backup ────────────────────────────────────────────────────────────────
 BACKUP="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$TAG"
@@ -136,8 +142,15 @@ echo "$(date -u +%FT%TZ) $TAG $(git -C "$SRC" rev-parse HEAD)" >> "$STATE_DIR/hi
 log "deployed $TAG"
 summary "Deployed \`$TAG\` ($(git -C "$SRC" rev-parse --short HEAD)); previous: \`$CURRENT\`; backup: \`$BACKUP\`."
 
-# Keep the last few deploy backups and the images of the current and previous release.
+# Keep the last few deploy backups, and the last $KEEP_IMAGE_TAGS release tags of each image
+# (newest first; the one running is always among them). Images built on this server
+# by earlier releases (local/automata-*) go once a GHCR release is running.
 ls -1dt "$BACKUP_ROOT"/*/ 2>/dev/null | tail -n +$((KEEP_BACKUPS + 1)) | xargs -r rm -rf
+for repo in "$WEB_REPO" "$BRIDGE_REPO"; do
+  docker images "$repo" --format '{{.CreatedAt}}\t{{.Tag}}' | grep -E $'\tv[0-9]+\\.[0-9]+\\.[0-9]+-bitsentry\\.[0-9]+$' \
+    | sort -r | cut -f2 | tail -n +$((KEEP_IMAGE_TAGS + 1)) | grep -v -x "$TAG" \
+    | sed "s#^#$repo:#" | xargs -r docker rmi >/dev/null 2>&1 || true
+done
 for repo in local/automata-web local/automata-bridge; do
-  docker images "$repo" --format '{{.Tag}}' | grep -v -x -e "$TAG" -e "$CURRENT" | sed "s#^#$repo:#" | xargs -r docker rmi >/dev/null 2>&1 || true
+  docker images "$repo" --format '{{.Repository}}:{{.Tag}}' | xargs -r docker rmi >/dev/null 2>&1 || true
 done

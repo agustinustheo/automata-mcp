@@ -1,9 +1,15 @@
 # BitSentry fork only (lives on bitsentry/build, never on main or a contribution branch).
-# Deploys a release of bitsentry/build to bitsentry-mcp on its self-hosted runner,
-# with backup, health check and automatic rollback: deploy/bitsentry/deploy.sh.
 #
-# Triggers: a tag v<upstream>-bitsentry.N pushed (by a person or by the upstream sync),
-# a GitHub Release published for such a tag, or a manual re-run with a tag.
+# A release tag v<upstream>-bitsentry.N on bitsentry/build:
+#   1. build  (GitHub-hosted)  web + telegram-bridge images, pushed to private GHCR
+#                              packages tagged <release> and sha-<commit>
+#   2. deploy (self-hosted on bitsentry-mcp) pull those tags with this job's own
+#                              read-only package token, back up, compose up, health
+#                              check, restore on failure: deploy/bitsentry/deploy.sh
+# Nothing is built on bitsentry-mcp.
+#
+# Triggers: a tag pushed (by a person or by the upstream sync), a GitHub Release
+# published for such a tag, or a manual re-run with a tag.
 name: BitSentry deploy
 
 on:
@@ -22,14 +28,20 @@ concurrency:
   group: bitsentry-deploy
   cancel-in-progress: false
 
-permissions:
-  contents: write
+permissions: {}
+
+env:
+  REGISTRY: ghcr.io/agustinustheo
 
 jobs:
-  deploy:
+  resolve:
     if: github.repository == 'agustinustheo/automata-mcp'
-    runs-on: [self-hosted, bitsentry-mcp, automata-deploy]
-    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.sha.outputs.sha }}
     steps:
       - name: Resolve tag
         id: tag
@@ -43,29 +55,95 @@ jobs:
             echo "::error::not a bitsentry release tag: $tag"; exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ steps.tag.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
-
       - name: Tag must be on bitsentry/build
+        id: sha
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           git fetch -q origin bitsentry/build
           git merge-base --is-ancestor "refs/tags/$TAG" origin/bitsentry/build \
             || { echo "::error::$TAG is not on bitsentry/build"; exit 1; }
+          echo "sha=$(git rev-parse "refs/tags/$TAG^{commit}")" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - dockerfile: apps/web/Dockerfile
+            image: automata-mcp-web
+          - dockerfile: apps/telegram-bridge/Dockerfile
+            image: automata-mcp-telegram-bridge
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - name: Build and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          SHA: ${{ needs.resolve.outputs.sha }}
+          IMAGE: ${{ env.REGISTRY }}/${{ matrix.image }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          docker buildx create --use --driver docker-container >/dev/null
+          docker buildx build --platform linux/amd64 -f "$DOCKERFILE" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=$SHA" \
+            --label "org.opencontainers.image.version=$TAG" \
+            --cache-from "type=registry,ref=$IMAGE:buildcache" \
+            --cache-to "type=registry,ref=$IMAGE:buildcache,mode=max" \
+            -t "$IMAGE:$TAG" -t "$IMAGE:sha-${SHA:0:12}" \
+            --push .
+          docker logout ghcr.io
+
+  deploy:
+    needs: [resolve, build]
+    runs-on: [self-hosted, bitsentry-mcp, automata-deploy]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+
+      # This job's own token, read-only on packages, valid for this job only:
+      # nothing long-lived is stored on the server.
+      - name: Log in to GHCR (read-only)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
 
       - name: Deploy
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          REGISTRY: ${{ env.REGISTRY }}
         run: deploy/bitsentry/deploy.sh "$TAG"
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
 
       - name: Publish the GitHub Release
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.resolve.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |

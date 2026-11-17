@@ -2,7 +2,8 @@
 # only offers workflow_dispatch for workflows on the default branch).
 # Upstream sync, run on demand (scheduled externally, from Grok Bot):
 #   gh workflow run bitsentry-sync.yml -R agustinustheo/automata-mcp --ref bitsentry/build
-# deploy/bitsentry/sync.sh. A new tag it pushes triggers bitsentry-deploy.yml.
+# Runs on a GitHub-hosted runner (nothing heavy on bitsentry-mcp): deploy/bitsentry/sync.sh.
+# A new tag it pushes triggers bitsentry-deploy.yml, which builds and deploys it.
 name: BitSentry upstream sync
 
 on:
@@ -18,12 +19,30 @@ permissions:
 jobs:
   sync:
     if: github.repository == 'agustinustheo/automata-mcp'
-    runs-on: [self-hosted, bitsentry-mcp, automata-deploy]
-    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           ref: bitsentry/build
           persist-credentials: false
+
+      # The repository's write deploy key: a workflow token may not push the
+      # workflow-file changes upstream's commits carry, and a tag pushed with it
+      # would not trigger the deploy.
+      - name: Deploy key
+        env:
+          SYNC_DEPLOY_KEY: ${{ secrets.SYNC_DEPLOY_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SYNC_DEPLOY_KEY" > ~/.ssh/automata_deploy && chmod 600 ~/.ssh/automata_deploy
+          # GitHub's published ed25519 host key, pinned rather than fetched.
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/known_hosts
+          printf 'Host github-automata\n  HostName github.com\n  User git\n  IdentityFile ~/.ssh/automata_deploy\n  IdentitiesOnly yes\n  StrictHostKeyChecking yes\n' > ~/.ssh/config
+
       - name: Sync upstream, check, tag
         run: deploy/bitsentry/sync.sh
+
+      - name: Remove the key
+        if: always()
+        run: rm -f ~/.ssh/automata_deploy

@@ -6,9 +6,10 @@
 #
 # The fork is public, and a self-hosted runner on a public repository would run
 # whatever a pull request's workflow asks for. This refuses every job that is
-# not one of our two workflows, on our branch or a release tag, from an event
-# only people with write access can cause (no schedules: syncs are triggered externally). A non-zero exit fails the job before
-# any step runs.
+# not our deploy workflow, on our branch or a release tag, from an event only
+# people with write access can cause. (Builds and the upstream sync run on
+# GitHub-hosted runners; this one only pulls and deploys.) A non-zero exit fails
+# the job before any step runs.
 set -u
 
 REPO=agustinustheo/automata-mcp
@@ -22,7 +23,7 @@ case "${GITHUB_EVENT_NAME:-}" in
 esac
 
 case "${GITHUB_WORKFLOW_REF:-}" in
-  "$REPO/.github/workflows/bitsentry-deploy.yml@"*|"$REPO/.github/workflows/bitsentry-sync.yml@"*) ;;
+  "$REPO/.github/workflows/bitsentry-deploy.yml@"*) ;;
   *) deny "workflow ${GITHUB_WORKFLOW_REF:-?}" ;;
 esac
 
