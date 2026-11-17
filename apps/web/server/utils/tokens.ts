@@ -2,6 +2,7 @@ import type { AppMcpToken, Db } from './app-db'
 import type { McpScope } from './mcp-scope'
 import type { ScopeInput } from './scope-schema'
 import type { PublicTokenClient } from './mcp-clients'
+import { isOptInTool } from '#shared/opt-in-tools'
 
 /**
  * MCP token CRUD.
@@ -146,7 +147,9 @@ export function scopeFields(scope: McpScope) {
     all_tables: scope.allTables,
     table_names: scope.allTables ? [] : scope.tableNames,
     all_tools: scope.allTools,
-    tool_names: scope.allTools ? [] : scope.toolNames,
+    // Under all_tools only opt-in names survive: all_tools does not cover them
+    // (shared/opt-in-tools.ts), so dropping them would silently untick them.
+    tool_names: scope.allTools ? scope.toolNames.filter(isOptInTool) : scope.toolNames,
   }
 }
 

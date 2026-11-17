@@ -87,6 +87,14 @@ const manualError = ref('')
 // request is dispatched, and treating it as settled flashes the empty state.
 const loading = (status: Ref<string>) => computed(() => status.value === 'idle' || status.value === 'pending')
 const toolsLoading = loading(toolStatus)
+
+/**
+ * Ordinary actions follow the All / Only selected switch. Opt-in actions
+ * (media downloads) are never covered by "All actions", so they get their own
+ * checkboxes, shown in both modes. See shared/opt-in-tools.ts.
+ */
+const regularTools = computed(() => (toolData.value?.tools ?? []).filter(tool => !tool.optIn))
+const optInTools = computed(() => (toolData.value?.tools ?? []).filter(tool => tool.optIn))
 const chatsLoading = loading(chatStatus)
 const tablesLoading = loading(tableStatus)
 
@@ -275,7 +283,7 @@ async function addByNumber() {
 
         <template v-else>
           <div
-            v-for="tool in toolData?.tools ?? []"
+            v-for="tool in regularTools"
             :key="tool.name"
             class="flex items-start gap-3"
           >
@@ -298,6 +306,45 @@ async function addByNumber() {
             </div>
           </div>
         </template>
+      </div>
+
+      <!--
+        Opt-in actions, outside the All / Only selected switch: "All actions"
+        never includes them, so an existing token does not start downloading
+        files because the server was upgraded. Ticked here, in either mode.
+      -->
+      <div v-if="optInTools.length > 0" class="space-y-2 rounded-md border border-dashed p-3">
+        <div>
+          <p class="text-sm font-medium">
+            Media downloads
+          </p>
+          <p class="text-xs text-muted-foreground">
+            Not included in "All actions". Tick to let this token fetch the photos, voice notes and files messages carry, in the chats it can read.
+          </p>
+        </div>
+        <div
+          v-for="tool in optInTools"
+          :key="tool.name"
+          class="flex items-start gap-3"
+        >
+          <Checkbox
+            :id="`tool-${tool.name}`"
+            :model-value="scope.tool_names.includes(tool.name)"
+            class="mt-0.5"
+            @update:model-value="toggle('tool_names', tool.name, $event === true)"
+          />
+          <div class="min-w-0 flex-1">
+            <Label :for="`tool-${tool.name}`" class="flex items-center gap-2 font-normal">
+              {{ tool.title }}
+              <Badge variant="secondary" class="text-[10px]">
+                read
+              </Badge>
+            </Label>
+            <p class="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+              {{ tool.description }}
+            </p>
+          </div>
+        </div>
       </div>
 
       <!--

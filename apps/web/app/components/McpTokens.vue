@@ -2,6 +2,7 @@
 import { PlusIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import { assertNever } from '#shared/connection'
+import { isOptInTool } from '#shared/opt-in-tools'
 
 const props = withDefaults(defineProps<{
   instanceId: string
@@ -74,7 +75,8 @@ function initialScope(): TokenScope {
       return openScope()
     case 'postgres':
     case 'imap': {
-      const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
+      // Opt-in tools stay unticked: a preset must never grant what "All actions" withholds.
+      const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly && !t.optIn).map(t => t.name)
       return readOnlyScope(readTools)
     }
     default:
@@ -296,7 +298,8 @@ async function create() {
     kind: props.kind,
     expiry: newExpiry.value,
     all_tools: scope.all_tools,
-    tool_count: scope.tool_names.length,
+    // Ordinary actions only: under "All actions" tool_names holds just opt-in tools.
+    tool_count: scope.tool_names.filter(name => !isOptInTool(name)).length,
     all_chats: scope.all_chats,
     all_tables: scope.all_tables,
     for_other_member: Boolean(newAssignee.value) && newAssignee.value !== user.value?.id,
