@@ -685,13 +685,23 @@ export class SessionManager {
     size: number
     data: string
   }> {
-    await this.row(id)
+    // One signal for the whole operation, from entry: the caller disconnecting
+    // (already, or later), the deadline, or the bytes passing the cap (a reported
+    // size is Telegram's claim, not a promise). Every await below is bounded by it.
+    const overCap = new AbortController()
+    const stop = AbortSignal.any([signal, AbortSignal.timeout(MEDIA_DOWNLOAD_DEADLINE_MS), overCap.signal])
+    const stopped = () => overCap.signal.aborted
+      ? new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
+      : new HttpError(504, 'Downloading the file from Telegram took too long, or the caller went away.')
+    const bounded = <T>(work: Promise<T>): Promise<T> => untilAborted(work, stop, stopped)
+
+    await bounded(this.row(id))
     const rt = this.runtime(id)
     const client = this.connectedClient(rt)
     const store = new SyncStore(this.sql, id)
 
-    const chat = await store.chat(chatId)
-    const accessHash = chat?.access_hash ?? (BigInt(chatId) > 0n ? await store.userAccessHash(chatId) : null)
+    const chat = await bounded(store.chat(chatId))
+    const accessHash = chat?.access_hash ?? (BigInt(chatId) > 0n ? await bounded(store.userAccessHash(chatId)) : null)
     const peer = chat || accessHash ? inputPeerFor(chatId, accessHash) : undefined
     if (!peer) {
       throw new HttpError(404, 'This chat is not known to the bridge. List chats first.')
@@ -699,10 +709,11 @@ export class SessionManager {
 
     let message: Api.Message | undefined
     try {
-      const [found] = await client.getMessages(peer, { ids: [messageId] })
+      const [found] = await bounded(client.getMessages(peer, { ids: [messageId] }))
       message = found instanceof Api.Message ? found : undefined
     }
     catch (error) {
+      if (error instanceof HttpError) throw error
       throw toHttpError(error)
     }
     if (!message || markedId(message.peerId) !== chatId) {
@@ -717,33 +728,19 @@ export class SessionManager {
       throw new HttpError(413, `This file is ${formatBytes(info.size)}, over the ${formatBytes(maxBytes)} this connector fetches.`, undefined, { size: info.size })
     }
 
-    // Stopped by whichever comes first: the caller disconnecting, the deadline,
-    // or the bytes passing the cap (a reported size is Telegram's, not a promise).
-    const stop = new AbortController()
-    const timer = setTimeout(() => stop.abort(), MEDIA_DOWNLOAD_DEADLINE_MS)
-    const onGone = () => stop.abort()
-    signal.addEventListener('abort', onGone, { once: true })
-    let overCap = false
+    if (stop.aborted) throw stopped()
     let data: string | Buffer | undefined
     try {
       data = await client.downloadMedia(message, {
-        signal: stop.signal,
+        signal: stop,
         progressCallback: (downloaded) => {
-          if (Number(downloaded.toString()) > maxBytes) {
-            overCap = true
-            stop.abort()
-          }
+          if (Number(downloaded.toString()) > maxBytes) overCap.abort()
         },
       })
     }
     catch (error) {
-      if (overCap) throw new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
-      if (stop.signal.aborted) throw new HttpError(504, 'Downloading the file from Telegram took too long.')
+      if (stop.aborted) throw stopped()
       throw toHttpError(error)
-    }
-    finally {
-      clearTimeout(timer)
-      signal.removeEventListener('abort', onGone)
     }
     if (!Buffer.isBuffer(data)) throw new HttpError(502, 'Telegram returned no file for this message.')
     if (data.length > maxBytes) {
@@ -1345,6 +1342,22 @@ function parseResolveQuery(query: string): { username: string } | { phone: strin
   const phone = /^\+?(\d[\d\s-]{5,20}\d)$/.exec(value)
   if (phone?.[1]) return { phone: phone[1].replace(/\D/g, '') }
   return undefined
+}
+
+/**
+ * `work`, or the error `stopped()` makes as soon as `signal` aborts — including
+ * when it already has. The work itself runs on; this only stops waiting for it.
+ */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal, stopped: () => Error): Promise<T> {
+  if (signal.aborted) return Promise.reject(stopped())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(stopped())
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value) },
+      (error) => { signal.removeEventListener('abort', onAbort); reject(error) },
+    )
+  })
 }
 
 /** Media downloads one bridge runs at once. */
