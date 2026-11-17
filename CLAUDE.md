@@ -96,7 +96,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              webauthn, entitlements, hosted-events, cloud, mcp-scope,
                              signup-policy, login-throttle, lookup-cache, deadline,
                              body-limit, search-terms, html-text, pg-socket, shared-cache,
-                             request-abort, …
+                             request-abort, media, …
   server/emails/             account-email templates (layout.ts + account.ts). Not auto-imported;
                              no Nuxt imports, so test/emails.test.mjs loads them into plain Node
   public/email/              automata-email-logo.png, the emails' header image
@@ -273,6 +273,8 @@ Four facts about discovery, verified against 0.19.0, not worth rediscovering:
 Four easy-to-break-later points. **`protocolMessage.type` is integer, absent means REVOKE** — proto3 omits zero, so deletion arrives with no `type`; reading as "unknown, keep" surfaces every deletion as empty message — the bug this fixes. Same trap in `secretEncType`, why `UnreadableReason` has second `'encrypted-content'` value rather than asserting edit it can't show. **None of it can move into `where.messageType`**: column carries no subtype, so excluding `protocolMessage` upstream deletes every edit with bookkeeping, and `associatedChildMessage` must be kept — so drop is local, `total` (and `totalMatching`) overcounts by dropped amount, count reported not subtracted. Subtracting right for one page, confidently wrong across range. **`hasMore` still counted on `records`**, before reaction and control-record filters, else bookkeeping-heavy page reads as end of conversation. In `searchMessages()` nested `COALESCE` arms name **explicit paths only** — `$.**` recursive jsonb path would match `contextInfo.quotedMessage.conversation`, making reply findable by quoted text = misattribution by construction.
 
 Deliberate non-goals, not oversights: deletion dropped like any control record, not surfaced as "retracted" (original row stays with text, nothing marks it); `ephemeralMessage` and `viewOnceMessage*` family *not* unwrapped — flattening view-once photo to bare `[image]` presents it as ordinary photo; honest version needs own marker; album items surfaced individually, not grouped by `messageContextInfo.messageAssociation.parentMessageKey`.
+
+**Messages carrying a file are marked, additively.** `read-messages` adds `hasMedia: true` + `mediaType`/`mimetype`/`fileName`/`fileSize` to a message whose payload holds a media node with a `mediaKey` (`mediaOfPayload()` in `chats.ts`: same unwrapping as `classifyContent`, plus one `ephemeralMessage` level — a disappearing-chat photo is still a photo — never `viewOnceMessage*`, and never a node flagged `viewOnce`). Keys absent otherwise, never `false`. Every value is the sender's claim — `fileLength` included (a uint64: number, digit string or Long, read by `fileLengthOf`, never guessed) — and MIME type and file name go through `cleanMimeType` / `cleanFileName` (`media.ts`).
 
 **Tools take no connection argument.** Token bound to one instance, so `useMcpAuth()`, `useEvolutionClient()` and `withPg()` already resolve to it. Instance param would reintroduce addressing wrong number — now wrong database. Never accept Evolution API key or DSN as tool argument.
 

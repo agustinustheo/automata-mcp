@@ -587,6 +587,15 @@ On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see [Pin the
 ports](deploy-railway.md#pin-the-ports)).
 
+## Media in messages
+
+`read-messages` marks a message that carries a file with `hasMedia: true`,
+`mediaType` (`image`, `video`, `video-note`, `audio`, `voice`, `document` or
+`sticker`), `mimetype`, and — when the sender's device said — `fileName` and
+`fileSize`. These keys are additive: a message without a file carries none of
+them. They describe what the sender's device reported, and view-once media is
+not marked.
+
 ## Chats addressed by LID (`…@lid`)
 
 WhatsApp addresses a person in one of two ways. The familiar one is a
