@@ -1,0 +1,30 @@
+# BitSentry fork only (lives on bitsentry/build, the fork's default branch, which is
+# where GitHub reads scheduled workflows from). Daily upstream sync:
+# deploy/bitsentry/sync.sh. A new tag it pushes triggers bitsentry-deploy.yml.
+name: BitSentry upstream sync
+
+on:
+  schedule:
+    # 04:30 Asia/Saigon (UTC+7) = 21:30 UTC.
+    - cron: '30 21 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bitsentry-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.repository == 'agustinustheo/automata-mcp'
+    runs-on: [self-hosted, bitsentry-mcp, automata-deploy]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bitsentry/build
+          persist-credentials: false
+      - name: Sync upstream, check, tag
+        run: deploy/bitsentry/sync.sh

@@ -1,0 +1,76 @@
+# BitSentry fork only (lives on bitsentry/build, never on main or a contribution branch).
+# Deploys a release of bitsentry/build to bitsentry-mcp on its self-hosted runner,
+# with backup, health check and automatic rollback: deploy/bitsentry/deploy.sh.
+#
+# Triggers: a tag v<upstream>-bitsentry.N pushed (by a person or by the daily sync),
+# a GitHub Release published for such a tag, or a manual re-run with a tag.
+name: BitSentry deploy
+
+on:
+  push:
+    tags: ['v*-bitsentry.*']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to deploy (v<upstream>-bitsentry.N)
+        required: true
+        type: string
+
+concurrency:
+  group: bitsentry-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    if: github.repository == 'agustinustheo/automata-mcp'
+    runs-on: [self-hosted, bitsentry-mcp, automata-deploy]
+    timeout-minutes: 60
+    steps:
+      - name: Resolve tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          tag="${INPUT_TAG:-${RELEASE_TAG:-$REF_NAME}}"
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-bitsentry\.[0-9]+$ ]]; then
+            echo "::error::not a bitsentry release tag: $tag"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Tag must be on bitsentry/build
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git fetch -q origin bitsentry/build
+          git merge-base --is-ancestor "refs/tags/$TAG" origin/bitsentry/build \
+            || { echo "::error::$TAG is not on bitsentry/build"; exit 1; }
+
+      - name: Deploy
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: deploy/bitsentry/deploy.sh "$TAG"
+
+      - name: Publish the GitHub Release
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          api="https://api.github.com/repos/$REPO/releases"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          if curl -sf "${auth[@]}" "$api/tags/$TAG" >/dev/null; then echo "release exists"; exit 0; fi
+          jq -n --arg t "$TAG" '{tag_name:$t, name:$t, body:"Deployed to bitsentry-mcp by the BitSentry deploy workflow.", prerelease:false}' \
+            | curl -sf "${auth[@]}" -X POST "$api" -d @- >/dev/null

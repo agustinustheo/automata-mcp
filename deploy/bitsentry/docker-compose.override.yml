@@ -1,0 +1,81 @@
+# Local overrides on top of the upstream docker-compose.yml (kept unmodified for easy upgrades).
+# - no host port: web is reachable only through Traefik on the external "proxy" network:
+#     public  https://automata.mcp.bitsentry.ai        -> /mcp only, Authorization: Bearer wamcp_... required
+#     tailnet https://automata-admin.mcp.bitsentry.ai  -> dashboard
+# - Evolution API, Redis, Telegram bridge: internal compose network only, never published
+# - Database: shared Postgres in /opt/postgres (host shared-postgres on internal network pgnet),
+#   db "automata", non-superuser role "automata" (password = POSTGRES_PASSWORD in .env).
+#   The bundled postgres service is disabled (profile "old-local-pg"); its volume
+#   automata_postgres_data is kept as rollback (migrated 2026-11-16, delete after 2026-11-23).
+# - memory limits so previews keep >4 GB
+# - web / telegram-bridge images come from docker-compose.release.yml, written by deploy.sh per release
+# Source of truth: deploy/bitsentry/docker-compose.override.yml on branch bitsentry/build (installed by deploy.sh).
+x-db-url: &db-url postgresql://${POSTGRES_USER:-automata}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@shared-postgres:5432/${POSTGRES_DB:-automata}
+
+services:
+  postgres:
+    profiles: [old-local-pg]
+
+  web:
+    ports: !reset []
+    depends_on: !reset {}
+    networks: [default, proxy, pgnet]
+    mem_limit: 512m
+    environment:
+      NODE_OPTIONS: --max-old-space-size=384
+      NUXT_DATABASE_URL: *db-url
+      NUXT_EVOLUTION_DATABASE_URL: *db-url
+      NUXT_TELEGRAM_DATABASE_URL: *db-url
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: proxy
+      traefik.http.services.automata.loadbalancer.server.port: "3000"
+      # PUBLIC: only POST/GET/DELETE /mcp, and only with a well-formed Automata token in the header
+      # (wamcp_ + 43 base64url chars). Anything else (no/odd header, token-in-URL, dashboard paths,
+      # .well-known) gets 404 from Traefik and never reaches the app. The app then validates the token.
+      traefik.http.routers.automata.rule: Host(`${AUTOMATA_HOST}`) && (Path(`/mcp`) || PathPrefix(`/mcp-media/`)) && HeaderRegexp(`Authorization`, `^(?i:bearer) wamcp_[A-Za-z0-9_-]{43}$`)
+      traefik.http.routers.automata.entrypoints: websecure
+      traefik.http.routers.automata.service: automata
+      traefik.http.routers.automata.middlewares: automata-ratelimit
+      traefik.http.middlewares.automata-ratelimit.ratelimit.average: "120"
+      traefik.http.middlewares.automata-ratelimit.ratelimit.period: 1m
+      traefik.http.middlewares.automata-ratelimit.ratelimit.burst: "60"
+      traefik.http.routers.automata.tls.certresolver: cf
+      traefik.http.routers.automata.tls.domains[0].main: "*.mcp.bitsentry.ai"
+      # TAILNET ONLY: dashboard (login, QR pairing, tokens). DNS points at the tailnet IP and
+      # Traefik also requires a Tailscale source address, so a spoofed Host header from the internet gets 404.
+      traefik.http.routers.automata-admin.rule: Host(`${AUTOMATA_ADMIN_HOST}`) && (ClientIP(`100.64.0.0/10`) || ClientIP(`fd7a:115c:a1e0::/48`))
+      traefik.http.routers.automata-admin.entrypoints: websecure
+      traefik.http.routers.automata-admin.service: automata
+      traefik.http.routers.automata-admin.tls.certresolver: cf
+
+  redis:
+    mem_limit: 128m
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "96mb", "--maxmemory-policy", "allkeys-lru"]
+
+  evolution:
+    # Pinned to stock Evolution 2.3.7 (upstream main moved to evolution-api-reforged 3.1.0,
+    # which rewrites "Message" on first start). Upstream supports the app on stock 2.3.7.
+    # Switching engines is a separate, deliberate decision; see deploy/bitsentry/README.md.
+    image: evoapicloud/evolution-api:v2.3.7
+    depends_on: !override
+      redis:
+        condition: service_healthy
+    networks: [default, pgnet]
+    mem_limit: 768m
+    environment:
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-automata}:${POSTGRES_PASSWORD}@shared-postgres:5432/${POSTGRES_DB:-automata}?schema=public
+
+  telegram-bridge:
+    depends_on: !reset {}
+    networks: [default, pgnet]
+    mem_limit: 384m
+    environment:
+      NODE_OPTIONS: --max-old-space-size=288
+      TELEGRAM_BRIDGE_DATABASE_URL: *db-url
+
+networks:
+  proxy:
+    external: true
+  pgnet:
+    external: true
