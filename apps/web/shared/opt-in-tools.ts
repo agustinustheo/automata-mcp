@@ -13,7 +13,7 @@
  * `scopeFromInput`) and the token dialog (which renders them as their own
  * group), so the two cannot drift.
  */
-export const OPT_IN_TOOLS: readonly string[] = ['download-media']
+export const OPT_IN_TOOLS: readonly string[] = ['download-media', 'download-telegram-media']
 
 export function isOptInTool(name: string): boolean {
   return OPT_IN_TOOLS.includes(name)

@@ -1,16 +1,18 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import type { H3Event } from 'h3'
 import { assertNever } from '#shared/connection'
 
 /**
- * Media downloads for WhatsApp messages: the size caps, the signed-URL format,
- * bounded reads, and the shape of a tool result carrying a file. The fetching
- * lives in `whatsapp-media.ts`.
+ * Media downloads for WhatsApp and Telegram messages: the size caps, the
+ * signed-URL format, bounded reads, and the shape of a tool result carrying a
+ * file. The per-kind fetching lives in `whatsapp-media.ts` and
+ * `telegram-media.ts`.
  *
- * **Nothing is stored.** Bytes are fetched from Evolution on each call and
- * handed straight back, the same rule as IMAP attachments. A signed
+ * **Nothing is stored.** Bytes are fetched from Evolution or the bridge on each
+ * call and handed straight back, the same rule as IMAP attachments. A signed
  * URL holds no bytes either: following it fetches the file again, after the
  * same checks the tool ran.
  *
@@ -23,7 +25,9 @@ import { assertNever } from '#shared/connection'
  * **Memory is bounded before bytes are held.** A sender's reported size is a
  * claim, so Evolution's answer (one JSON body with the whole file as base64) is
  * read through `fetchBase64Media`, which decodes the file as it streams and
- * stops at the cap rather than parsing whatever arrives. At most `MEDIA_DOWNLOADS_IN_FLIGHT` downloads run at
+ * stops at the cap rather than parsing whatever arrives; the bridge's answer is a byte stream, piped
+ * through (`pipeMediaToResponse`) or read capped for an inline result
+ * (`readStreamCapped`). At most `MEDIA_DOWNLOADS_IN_FLIGHT` downloads run at
  * once in this process, one per connection (`acquireMediaSlot`), each slot held
  * until its file has been delivered — by link or inline — or the delivery guard
  * cut it off (`deliveryGuard`: deadline, stall, caller gone).
@@ -51,13 +55,15 @@ const DELIVERY_SLICE_BYTES = 64 * 1024
 /** Image types every MCP client renders. Anything else goes back as an embedded file. */
 const INLINE_IMAGE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
 
-export type MediaKind = 'whatsapp'
+export type MediaKind = 'whatsapp' | 'telegram'
 
 /** The tool whose grant a signed URL of this kind depends on. */
 export function mediaToolFor(kind: MediaKind): string {
   switch (kind) {
     case 'whatsapp':
       return 'download-media'
+    case 'telegram':
+      return 'download-telegram-media'
     default:
       return assertNever(kind, 'media kind')
   }
@@ -87,7 +93,7 @@ export interface MediaFile {
 
 /** What a caller is told about a file, with or without its bytes. */
 export interface MediaMeta {
-  /** `image`, `video`, `video-note`, `audio`, `voice`, `document` or `sticker`. */
+  /** `image`, `video`, `video-note`, `audio`, `voice`, `document`, `sticker` or `photo`. */
   mediaType: string
   mimeType: string
   fileName?: string
@@ -184,9 +190,10 @@ const inFlightByConnection = new Map<string, number>()
 
 /**
  * Take one of this process's few media slots for this connection, or refuse
- * with 429; the caller must call the returned release exactly once. A download
- * holds its file until it has been delivered, so the number in flight is what
- * bounds the memory held, whatever the per-minute budgets allow. One connection gets one slot at a
+ * with 429; the caller must call the returned release exactly once. A buffered
+ * download holds a file several times over while it is decoded, and a streamed
+ * one holds a source connection, so the number in flight is what bounds both,
+ * whatever the per-minute budgets allow. One connection gets one slot at a
  * time, so a slow reader on one connection cannot shut every other out.
  */
 export function acquireMediaSlot(connectionId: string): () => void {
@@ -238,19 +245,67 @@ export async function withMediaSlot<T>(connectionId: string, work: () => Promise
 }
 
 /**
+ * Open a raw byte answer as a stream, without reading it. An error answer is
+ * read up to 64 KiB and thrown as `MediaFetchError` (status and parsed body),
+ * like `fetchBase64Media`'s.
+ */
+export async function openMediaStream(
+  client: typeof $fetch,
+  url: string,
+  options: Record<string, unknown>,
+): Promise<{ headers: Headers, body: ReadableStream<Uint8Array> }> {
+  const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
+  const stream = response._data as ReadableStream<Uint8Array> | undefined
+  if (!response.ok) {
+    const text = stream ? (await readCapped(stream, 64 * 1024)).text : ''
+    throw new MediaFetchError(response.status, safeJson(text))
+  }
+  if (!stream) throw new MediaFetchError(502, undefined)
+  return { headers: response.headers, body: stream }
+}
+
+/**
+ * A whole stream as one Buffer, refused with 413 the moment it passes
+ * `maxBytes`. For inline results only. A source that stops mid-stream is a
+ * broken download (502), never a short file.
+ */
+export async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<Buffer> {
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    let step: ReadableStreamReadResult<Uint8Array>
+    try {
+      step = await reader.read()
+    }
+    catch {
+      throw createError({ statusCode: 502, message: 'The download broke off before the whole file arrived. Try again.' })
+    }
+    if (step.done) break
+    size += step.value.byteLength
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => {})
+      throw createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxBytes)} this connector fetches.` })
+    }
+    chunks.push(step.value)
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
  * Send a file to the caller through `stream.pipeline`: backpressure (the source
  * is read only as fast as the caller takes it), a byte cap, and the connection
  * destroyed on any failure — the source breaking off, passing `maxBytes`,
  * missing or passing `expectedBytes` (an exact size, sent as Content-Length),
  * or the delivery guard stopping it (`deliveryGuard`) — so a cut-off file
- * never ends as if it were whole. `body` is the file, already held: Evolution
- * answers with it whole. Resolves to whether the whole file was delivered;
+ * never ends as if it were whole. `body` is the bridge's stream, or a buffer
+ * already held (WhatsApp). Resolves to whether the whole file was delivered;
  * the caller holds its media slot until then. Headers must be set before
  * calling.
  */
 export async function pipeMediaToResponse(
   event: H3Event,
-  body: Buffer,
+  body: ReadableStream<Uint8Array> | Buffer,
   maxBytes: number,
   expectedBytes?: number,
 ): Promise<boolean> {
@@ -272,7 +327,9 @@ export async function pipeMediaToResponse(
   // A held buffer goes out in slices, each written only once the caller has
   // taken the last, like a stream: one write of the whole file would queue it
   // all at once and leave nothing to pace or to measure progress by.
-  const source = Readable.from(slices(body, DELIVERY_SLICE_BYTES))
+  const source = Buffer.isBuffer(body)
+    ? Readable.from(slices(body, DELIVERY_SLICE_BYTES))
+    : Readable.fromWeb(body as unknown as NodeReadableStream<Uint8Array>)
   const guard = deliveryGuard(event, { stall: true })
   try {
     await pipeline(source, counter, res, { signal: guard.signal })
@@ -359,7 +416,7 @@ export function cappedBodyBytes(maxBytes: number): number {
   return Math.ceil(maxBytes / 3) * 4 + 256 * 1024
 }
 
-/** Shape of an HTTP failure as `httpStatusOf` reads it (like ofetch's). */
+/** Shape of an HTTP failure as `httpStatusOf` and `relayBridgeError` read it (like ofetch's). */
 export class MediaFetchError extends Error {
   constructor(public status: number, public data: unknown) {
     super(`media fetch answered ${status}`)
@@ -473,9 +530,9 @@ export interface MediaRef {
   i: string
   /** Token id the URL was minted for; only that token may follow it. */
   t: string
-  /** Chat: the WhatsApp JID. */
+  /** Chat: a WhatsApp JID, or a Telegram marked chat id. */
   c: string
-  /** Message id: WhatsApp's key id. */
+  /** Message id: WhatsApp's key id, or Telegram's numeric id as a string. */
   m: string
   /** Expiry, unix seconds. */
   e: number
@@ -537,7 +594,7 @@ export function verifyMediaRef(blob: string | undefined, now = Date.now()): Medi
   catch {
     return { ok: false, reason: 'invalid' }
   }
-  if (ref?.v !== 1 || ref.k !== 'whatsapp'
+  if (ref?.v !== 1 || (ref.k !== 'whatsapp' && ref.k !== 'telegram')
     || typeof ref.i !== 'string' || typeof ref.t !== 'string' || typeof ref.c !== 'string'
     || typeof ref.m !== 'string' || typeof ref.e !== 'number') {
     return { ok: false, reason: 'invalid' }

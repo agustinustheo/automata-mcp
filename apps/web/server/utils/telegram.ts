@@ -161,6 +161,8 @@ export type BridgeResolved = {
   known: boolean
 }
 
+const BRIDGE_MEDIA_DEADLINE_MS = 90_000
+
 export type BridgeSent = {
   chatId: string
   messageId: number
@@ -219,6 +221,13 @@ export function createTelegramBridge(creds: TelegramCredentials) {
     // count. The bridge stores it and fetches at backfill's own pace.
     backfill: (chatId: string) => client<BridgeBackfill>(`${session}/backfill`, { method: 'POST', body: { chatId } }),
     send: (chatId: string, text: string) => client<BridgeSent>(`${session}/send`, { method: 'POST', body: { chatId, text } }),
+    // The file as a byte stream, never read here: callers pipe it or read it
+    // capped (telegram-media.ts). Metadata comes in the bridge's x-media-* headers.
+    media: (chatId: string, messageId: number, maxBytes: number, signal?: AbortSignal) => openMediaStream(client, `${session}/media`, {
+      query: { chatId, messageId, maxBytes },
+      timeout: BRIDGE_MEDIA_DEADLINE_MS,
+      ...(signal && { signal }),
+    }),
     webhook: (url: string, headers: Record<string, string>) => client(`${session}/webhook`, { method: 'PUT', body: { url, headers } }),
   }
 }

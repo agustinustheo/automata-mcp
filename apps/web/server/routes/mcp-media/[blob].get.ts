@@ -5,7 +5,7 @@
 import '#nuxt-mcp-toolkit/tools.mjs'
 
 /**
- * Follow a signed media URL minted by `download-media`.
+ * Follow a signed media URL minted by `download-media` / `download-telegram-media`.
  *
  * MCP side of the auth split: the bearer token is required here exactly as on
  * `/mcp` (never a cookie — `isMcpPath` covers this prefix, so the session
@@ -95,6 +95,43 @@ export default defineEventHandler(async (event) => {
       try {
         headers(file.mimeType, file.fileName, file.data.length)
         record(await pipeMediaToResponse(event, file.data, maxBytes, file.data.length))
+      }
+      finally {
+        release()
+      }
+      return
+    }
+
+    // Streamed straight through from the bridge: one media slot held until the
+    // pipe ends, however it ends (finished, cut off, or the client gone — which
+    // also aborts the bridge request through `requestAbortSignal`).
+    case 'telegram': {
+      const messageId = Number(ref.m)
+      let release: (() => void) | undefined
+      let opened: Awaited<ReturnType<typeof openTelegramMedia>>
+      try {
+        assertChatAllowed(auth.scope, ref.c)
+        await findTelegramMedia(auth, ref.c, messageId)
+        release = acquireMediaSlot(auth.instance.id)
+        opened = await openTelegramMedia(auth, ref.c, messageId, maxBytes, requestAbortSignal())
+      }
+      catch (error) {
+        release?.()
+        record(false)
+        throw error
+      }
+      try {
+        // A reported size over the cap is refused before anything is sent; the
+        // pipe holds the stream to the cap either way.
+        if (opened.meta.size !== undefined && opened.meta.size > opened.cap) {
+          await opened.body.cancel().catch(() => {})
+          record(false)
+          throw createError({ statusCode: 413, statusMessage: 'File larger than this connector fetches.' })
+        }
+        // The bridge reports a size only when it is exact (a document's, or the
+        // photo size it downloads) and fails a stream that ends short of it.
+        headers(opened.meta.mimeType, opened.meta.fileName, opened.meta.size)
+        record(await pipeMediaToResponse(event, opened.body, opened.cap, opened.meta.size))
       }
       finally {
         release()

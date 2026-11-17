@@ -121,7 +121,7 @@ export function describeScope(scope: TokenScope, kind: InstanceKind): string {
     case 'telegram':
       dataOpen = scope.all_chats
       data = scope.all_chats ? 'All chats' : plural(scope.chat_jids.length, 'chat')
-      hasMedia = kind === 'whatsapp'
+      hasMedia = true
       break
     // Folders ride the chat axis (`chat_jids` holds paths on a mail token).
     case 'imap':
