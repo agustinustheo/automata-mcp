@@ -12,14 +12,19 @@ export interface MediaInfo {
   mimeType: string
   fileName?: string
   size?: number
-  /** `size` is the file's exact length (a document's), not an estimate. */
+  /** `size` is the exact length of what is downloaded (a document's, or the photo size's), not an estimate. */
   exactSize?: boolean
 }
 
 export function mediaInfoOf(media: Api.TypeMessageMedia | undefined): MediaInfo | undefined {
   if (media instanceof Api.MessageMediaPhoto) {
     if (media.ttlSeconds || !(media.photo instanceof Api.Photo)) return undefined
-    return { mediaType: 'photo', mimeType: 'image/jpeg', size: downloadedPhotoSize(media.photo) }
+    const size = downloadedPhotoSize(media.photo)
+    return {
+      mediaType: 'photo',
+      mimeType: 'image/jpeg',
+      ...(size !== undefined && Number.isSafeInteger(size) && size >= 0 && { size, exactSize: true }),
+    }
   }
 
   if (media instanceof Api.MessageMediaDocument) {

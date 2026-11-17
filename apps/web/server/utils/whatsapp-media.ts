@@ -73,6 +73,12 @@ export async function findWhatsappMedia(auth: WhatsappAuth, jid: string, message
         : 'This message carries no downloadable file (photo, video, voice note, audio, document or sticker).',
     })
   }
+  if (!mediaReferenceIsSafe(node.node)) {
+    throw createError({
+      statusCode: 422,
+      message: 'This message\'s file does not point at WhatsApp\'s media servers, so it was not downloaded.',
+    })
+  }
 
   return {
     jid,
@@ -130,20 +136,62 @@ interface EvolutionMedia {
 /** Long enough for a large video through Evolution's own retry (it waits 5 s and tries again). */
 const MEDIA_DOWNLOAD_DEADLINE_MS = 90_000
 
+/** Where Baileys downloads a `directPath` from: `https://` + this host + the path, by string concatenation. */
+const MEDIA_CDN_HOST = 'mmg.whatsapp.net'
+/** A `directPath` as WhatsApp writes it (`/v/t62.7118-24/…enc?ccb=…&oh=…`): a path and query, nothing that could end the host. */
+const DIRECT_PATH = /^\/[A-Za-z0-9\-._~%][A-Za-z0-9\-._~%/?=&+]*$/
+
+/**
+ * Whether the node's file reference stays on WhatsApp's media servers. The
+ * stored payload is the sender's, and stock Evolution 2.3.7 (Baileys) fetches
+ * it as given: `url` if present, else `https://mmg.whatsapp.net` + `directPath`
+ * by plain concatenation — so `directPath: '.attacker.example/x'` names another
+ * host, and a crafted `url` any host at all: a request from Evolution's network
+ * to an address the sender chose. Both are checked by how a URL parser reads
+ * them, and a node failing either is refused, never cleaned: on every engine,
+ * since a reforged server reloading the stored row would fetch the same thing.
+ */
+function mediaReferenceIsSafe(node: Record<string, unknown>): boolean {
+  const { url, directPath } = node
+  if (url === undefined && directPath === undefined) return false
+  if (directPath !== undefined) {
+    if (typeof directPath !== 'string' || !DIRECT_PATH.test(directPath)) return false
+    if (!onHost(`https://${MEDIA_CDN_HOST}${directPath}`, host => host === MEDIA_CDN_HOST)) return false
+  }
+  if (url !== undefined) {
+    if (typeof url !== 'string' || !onHost(url, host => host.endsWith('.whatsapp.net'))) return false
+  }
+  return true
+}
+
+/** `https:`, no credentials, default port, and a hostname `allowed` accepts. */
+function onHost(value: string, allowed: (hostname: string) => boolean): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  }
+  catch {
+    return false
+  }
+  return parsed.protocol === 'https:' && !parsed.username && !parsed.password && parsed.port === ''
+    && allowed(parsed.hostname.toLowerCase())
+}
+
 /**
  * The media node as Evolution should download it: this row's node alone, under
- * its own key, with a `url` kept only when it points at WhatsApp's media CDN.
- *
- * The stored payload is the sender's: on stock Evolution 2.3.7 a `url` in it is
- * fetched as given, so a crafted message could make Evolution request an
- * internal address. Without `url`, Baileys builds the address from
- * `directPath` on mmg.whatsapp.net. Sending the node alone also skips wrappers
- * (an album item's `associatedChildMessage`) Evolution would not unwrap.
+ * its own key, already checked by `mediaReferenceIsSafe` — and without `url`
+ * when it has a `directPath`, so Baileys builds the address on
+ * mmg.whatsapp.net itself (some stored `url`s are a bare
+ * `https://web.whatsapp.net`, which serves no file). Sending the node alone
+ * also skips wrappers (an album item's `associatedChildMessage`) Evolution
+ * would not unwrap.
  */
 function downloadPayload(media: WhatsappMediaNode): Record<string, unknown> {
+  if (!mediaReferenceIsSafe(media.node)) {
+    throw createError({ statusCode: 422, message: 'This message\'s file does not point at WhatsApp\'s media servers, so it was not downloaded.' })
+  }
   const { url, ...rest } = media.node
-  const safeUrl = typeof url === 'string' && /^https:\/\/[a-z0-9.-]+\.whatsapp\.net\//i.test(url) ? url : undefined
-  return { [media.key]: { ...rest, ...(safeUrl && { url: safeUrl }) } }
+  return { [media.key]: rest.directPath === undefined ? { ...rest, url } : rest }
 }
 
 /**

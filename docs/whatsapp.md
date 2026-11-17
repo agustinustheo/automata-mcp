@@ -617,10 +617,16 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   `/chat/getBase64FromMediaMessage` and hands it straight back; nothing is
   written to disk. That route answers with the whole file as base64 inside one
   JSON body, so the file is held in memory while it passes through — bounded,
-  below — rather than streamed as Telegram's is. Evolution's
+  below — rather than streamed as Telegram's is. At its peak one download holds
+  about five copies (the body, its text, the base64 string, the decoded file),
+  so roughly 150 MB at the 25 MiB default; with three downloads at once, plan
+  for about 450 MB of headroom in the web process, or lower
+  `NUXT_MEDIA_MAX_BYTES`. Evolution's
   answer is read with a byte cap, so a file larger than its sender claimed is
   cut off rather than buffered, and at most three downloads run at once per web
-  process (more answer 429).
+  process (more answer 429). Those three are shared by every organization on
+  the deployment, like the other per-process bounds; each connection is still
+  held to its own costly-tool budget.
 - **Small files inline, larger ones by link.** Up to `NUXT_MEDIA_INLINE_MAX_BYTES`
   (5 MiB) the file is in the tool result — images as images, anything else as an
   embedded file. Up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) the tool returns a `url`
@@ -644,9 +650,11 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   `message_instance_key_id_idx` index below; without it, media downloads answer
   501 on such a server rather than scan the account. Stock 2.3.7 downloads from
   the message the app sends and needs neither.
-- **Not downloadable:** view-once media, and old media WhatsApp no longer holds —
-  Evolution asks the phone to re-upload expired media, which works only while
-  the phone is online and still has it.
+- **Not downloadable:** view-once media; a message whose file reference does
+  not point at WhatsApp's media servers (the stored message is the sender's, and
+  Evolution would fetch whatever address it names — refused with 422); and old
+  media WhatsApp no longer holds — Evolution asks the phone to re-upload expired
+  media, which works only while the phone is online and still has it.
 
 ## Chats addressed by LID (`…@lid`)
 

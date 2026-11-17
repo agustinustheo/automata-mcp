@@ -338,7 +338,9 @@ async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Pr
     size += value.byteLength
     chunks.push(value)
   }
-  return { text: Buffer.concat(chunks).toString('utf8'), truncated: false }
+  const whole = Buffer.concat(chunks)
+  chunks.length = 0
+  return { text: whole.toString('utf8'), truncated: false }
 }
 
 function safeJson(text: string): unknown {
