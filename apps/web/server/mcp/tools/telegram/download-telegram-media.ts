@@ -29,7 +29,8 @@ export default defineKindTool({
     + '`inline`). `delivery` chooses: `auto` (default) inlines small files, `url` always returns a '
     + 'link without fetching the file first (a file that turns out too large or not downloadable is '
     + 'refused when the link is followed), `inline` never does. Self-destructing media is not downloadable, and the account must be '
-    + 'online (get-telegram-status). Fetch only what the task needs: each call downloads the file.',
+    + 'online (get-telegram-status). Fetch only what the task needs: each download — inline, or a link '
+    + 'followed — fetches the file again.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,

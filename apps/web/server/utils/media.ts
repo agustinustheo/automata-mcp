@@ -458,7 +458,10 @@ export async function fetchBase64Media<T>(
     await stream.cancel().catch(() => {})
     throw tooLarge()
   }
-  const reader = new Base64FieldReader(field, maxFileBytes, known ? Math.floor(declared * 3 / 4) : undefined)
+  // Content-Length sizes the output only for an uncompressed answer: compressed,
+  // it counts the compressed bytes, not the base64 this reads after decoding.
+  const sized = known && !response.headers.get('content-encoding')
+  const reader = new Base64FieldReader(field, maxFileBytes, sized ? Math.floor(declared * 3 / 4) : undefined)
   const source = stream.getReader()
   let size = 0
   try {
