@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Daily upstream sync for the bitsentry fork of Automata.
+# Upstream sync for the bitsentry fork of Automata, run on demand by
+# .github/workflows/bitsentry-sync.yml (workflow_dispatch; scheduled from Grok Bot).
 #
 #   1. fetch ju-li/automata-mcp main; fast-forward our main (an exact mirror)
 #   2. merge main into bitsentry/build

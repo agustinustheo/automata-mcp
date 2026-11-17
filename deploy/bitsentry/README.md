@@ -8,9 +8,9 @@ in `agustinustheo/automata-mcp`. They are deploy configuration for one server,
 
 | Branch | What it is | Who writes it |
 |---|---|---|
-| `main` | Exact mirror of `ju-li/automata-mcp` `main`. Never carries our commits. | fast-forwarded by the daily sync |
+| `main` | Exact mirror of `ju-li/automata-mcp` `main`. Never carries our commits. | fast-forwarded by the sync |
 | `feature/*` | One clean feature off upstream `main` (e.g. `feature/media-download`), the upstream contribution branch. No BitSentry config, ever. | us, and upstream reviewers |
-| `bitsentry/build` | `main` + merged features + this directory. The only branch deployed. The fork's default branch, so the scheduled sync runs from it. | merges only |
+| `bitsentry/build` | `main` + merged features + this directory. The only branch deployed. The fork's default branch, so the sync workflow can be dispatched. | merges only |
 
 Get a feature in: merge its `feature/*` branch into `bitsentry/build` (normal merge,
 no squash), push, then tag a release (below). A fix requested upstream lands on the
@@ -48,22 +48,32 @@ v=$(jq -r .version package.json); n=$(git tag -l "v$v-bitsentry.*" | sed "s/.*bi
 git tag -a "v$v-bitsentry.$((n+1))" -m "…" && git push origin "v$v-bitsentry.$((n+1))"
 ```
 
-## Daily sync
+## Upstream sync (on demand)
 
-`.github/workflows/bitsentry-sync.yml`, 04:30 Asia/Saigon (21:30 UTC), on the same
-runner: `sync.sh` fast-forwards `main` to upstream, merges it into `bitsentry/build`,
-runs `pnpm typecheck`, `bridge:typecheck`, `cloud:typecheck`, `test:emails` and
-`listings:check`, then pushes and tags the next release, which deploys. A conflict or
-a failed check pushes nothing and fails the run (GitHub mails the owner). It pushes
-over the repository's deploy key (`github-automata` in the runner user's SSH config),
-since a workflow token may not push upstream's workflow-file changes.
+`.github/workflows/bitsentry-sync.yml` runs only when triggered (scheduling is done
+from Grok Bot, not by GitHub or T3):
+
+```bash
+gh workflow run bitsentry-sync.yml -R agustinustheo/automata-mcp --ref bitsentry/build
+# or: POST https://api.github.com/repos/agustinustheo/automata-mcp/actions/workflows/bitsentry-sync.yml/dispatches
+#     {"ref":"bitsentry/build"}   (token with Actions: write on the repo)
+```
+
+On the self-hosted runner, `sync.sh` fast-forwards `main` to upstream, merges it into
+`bitsentry/build`, runs `pnpm typecheck`, `bridge:typecheck`, `cloud:typecheck`,
+`test:emails` and `listings:check`, then pushes and tags the next release, which
+deploys. Nothing upstream changed: it says so and stops. A conflict or a failed check
+pushes nothing and fails the run, with the reason in the run summary (GitHub mails
+the person who triggered it). It pushes over the repository's deploy key
+(`github-automata` in the runner user's SSH config), since a workflow token may not
+push upstream's workflow-file changes.
 
 ## Runner safety
 
 The fork is public. The runner (user `automata-ci`, in the `docker` group, so
 root-equivalent on the box) runs only what `runner-job-guard.sh` allows: our two
-workflows, on `bitsentry/build` or a release tag, from push / release / schedule /
-manual events. Pull-request jobs are refused before any step runs, and fork pull
+workflows, on `bitsentry/build` or a release tag, from push / release / manual
+events. Pull-request jobs are refused before any step runs, and fork pull
 requests need approval to run workflows at all.
 
 ## Evolution engine

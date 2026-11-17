@@ -1,12 +1,11 @@
-# BitSentry fork only (lives on bitsentry/build, the fork's default branch, which is
-# where GitHub reads scheduled workflows from). Daily upstream sync:
+# BitSentry fork only (lives on bitsentry/build, the fork's default branch: GitHub
+# only offers workflow_dispatch for workflows on the default branch).
+# Upstream sync, run on demand (scheduled externally, from Grok Bot):
+#   gh workflow run bitsentry-sync.yml -R agustinustheo/automata-mcp --ref bitsentry/build
 # deploy/bitsentry/sync.sh. A new tag it pushes triggers bitsentry-deploy.yml.
 name: BitSentry upstream sync
 
 on:
-  schedule:
-    # 04:30 Asia/Saigon (UTC+7) = 21:30 UTC.
-    - cron: '30 21 * * *'
   workflow_dispatch:
 
 concurrency:

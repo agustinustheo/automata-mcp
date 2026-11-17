@@ -7,7 +7,7 @@
 # The fork is public, and a self-hosted runner on a public repository would run
 # whatever a pull request's workflow asks for. This refuses every job that is
 # not one of our two workflows, on our branch or a release tag, from an event
-# only people with write access can cause. A non-zero exit fails the job before
+# only people with write access can cause (no schedules: syncs are triggered externally). A non-zero exit fails the job before
 # any step runs.
 set -u
 
@@ -17,7 +17,7 @@ deny() { echo "runner guard: refused ($*)" >&2; exit 1; }
 [ "${GITHUB_REPOSITORY:-}" = "$REPO" ] || deny "repository ${GITHUB_REPOSITORY:-?}"
 
 case "${GITHUB_EVENT_NAME:-}" in
-  push|release|schedule|workflow_dispatch) ;;
+  push|release|workflow_dispatch) ;;
   *) deny "event ${GITHUB_EVENT_NAME:-?}" ;;
 esac
 
