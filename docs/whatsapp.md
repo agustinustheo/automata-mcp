@@ -614,7 +614,10 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   the message is looked up **inside** that chat (Evolution's own media route
   finds any message of the account by id alone).
 - **Never stored.** Each call downloads the file through Evolution's
-  `/chat/getBase64FromMediaMessage` and hands it straight back. Evolution's
+  `/chat/getBase64FromMediaMessage` and hands it straight back; nothing is
+  written to disk. That route answers with the whole file as base64 inside one
+  JSON body, so the file is held in memory while it passes through — bounded,
+  below — rather than streamed as Telegram's is. Evolution's
   answer is read with a byte cap, so a file larger than its sender claimed is
   cut off rather than buffered, and at most three downloads run at once per web
   process (more answer 429).

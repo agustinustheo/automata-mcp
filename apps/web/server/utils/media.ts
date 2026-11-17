@@ -160,11 +160,13 @@ export function signedUrlUnavailable(size: number | undefined, inlineMax: number
 let inFlight = 0
 
 /**
- * Run one download in one of this process's few media slots, or refuse with
- * 429. Each download holds a file several times over while it is decoded, so the
- * number in flight is what bounds memory, whatever the per-minute budgets allow.
+ * Take one of this process's few media slots, or refuse with 429; the caller
+ * must call the returned release exactly once. A buffered download holds a file
+ * several times over while it is decoded, and a streamed one holds a source
+ * connection, so the number in flight is what bounds both, whatever the
+ * per-minute budgets allow.
  */
-export async function withMediaSlot<T>(work: () => Promise<T>): Promise<T> {
+export function acquireMediaSlot(): () => void {
   if (inFlight >= MEDIA_DOWNLOADS_IN_FLIGHT) {
     throw createError({
       statusCode: 429,
@@ -172,12 +174,108 @@ export async function withMediaSlot<T>(work: () => Promise<T>): Promise<T> {
     })
   }
   inFlight++
+  let released = false
+  return () => {
+    if (!released) {
+      released = true
+      inFlight--
+    }
+  }
+}
+
+/** Run one download in a media slot, released when it settles. */
+export async function withMediaSlot<T>(work: () => Promise<T>): Promise<T> {
+  const release = acquireMediaSlot()
   try {
     return await work()
   }
   finally {
-    inFlight--
+    release()
   }
+}
+
+/**
+ * Open a raw byte answer as a stream, without reading it. An error answer is
+ * read up to 64 KiB and thrown as `MediaFetchError` (status and parsed body),
+ * like `fetchCappedJson`'s.
+ */
+export async function openMediaStream(
+  client: typeof $fetch,
+  url: string,
+  options: Record<string, unknown>,
+): Promise<{ headers: Headers, body: ReadableStream<Uint8Array> }> {
+  const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
+  const stream = response._data as ReadableStream<Uint8Array> | undefined
+  if (!response.ok) {
+    const text = stream ? (await readCapped(stream, 64 * 1024)).text : ''
+    throw new MediaFetchError(response.status, safeJson(text))
+  }
+  if (!stream) throw new MediaFetchError(502, undefined)
+  return { headers: response.headers, body: stream }
+}
+
+/** A whole stream as one Buffer, refused with 413 the moment it passes `maxBytes`. For inline results only. */
+export async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<Buffer> {
+  const reader = stream.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => {})
+      throw createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxBytes)} this connector fetches.` })
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks)
+}
+
+/**
+ * Pass a stream through unchanged, chunk by chunk, counting bytes: past
+ * `maxBytes` it errors (the response ends early and the client sees a broken
+ * download, never a short file passed off as whole). `done` runs exactly once,
+ * however the stream ends — finished, cut off, or cancelled by the client.
+ */
+export function cappedPassThrough(
+  source: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  done: (ok: boolean) => void,
+): ReadableStream<Uint8Array> {
+  const reader = source.getReader()
+  let size = 0
+  let settled = false
+  const finish = (ok: boolean) => {
+    if (!settled) {
+      settled = true
+      done(ok)
+    }
+  }
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done: end, value } = await reader.read()
+        if (end) {
+          controller.close()
+          finish(true)
+          return
+        }
+        size += value.byteLength
+        if (size > maxBytes) throw new Error(`media stream passed ${maxBytes} bytes`)
+        controller.enqueue(value)
+      }
+      catch (error) {
+        await reader.cancel().catch(() => {})
+        controller.error(error)
+        finish(false)
+      }
+    },
+    async cancel() {
+      await reader.cancel().catch(() => {})
+      finish(false)
+    },
+  })
 }
 
 /**

@@ -648,51 +648,83 @@ export class SessionManager {
   }
 
   /**
-   * Download the file one message carries, into memory, and hand it back.
-   * Nothing is written to disk or to the database.
+   * Stream the file one message carries, chunk by chunk, straight to the caller.
+   * Nothing is written to disk or to the database, and the file is never held
+   * whole: only the chunk in flight is in memory.
    *
    * The message is fetched **through the chat** and then checked to belong to
    * it: private chats and basic groups share one message-id counter per
    * account, so an id alone could name a message in another chat. A file over
-   * `maxBytes` is refused from its reported size before downloading, and again
-   * on the bytes.
+   * `maxBytes` is refused from its reported size before anything is sent (413,
+   * with the size), and cut off if the bytes pass it anyway.
+   *
+   * One signal bounds the whole operation from entry: the caller disconnecting
+   * (already, or later), the deadline, or the cap. The download slot is held
+   * until the stream ends or is cut off.
    */
   async media(id: string, chatId: string, messageId: number, maxBytes: number, signal: AbortSignal): Promise<{
-    mediaType: MediaInfo['mediaType']
-    mimeType: string
-    fileName?: string
-    size: number
-    data: string
+    headers: Record<string, string>
+    chunks: AsyncIterable<Buffer>
   }> {
-    // A file is held in memory several times over while it is encoded, in a
+    // A download holds a Telegram connection's attention for its duration, in a
     // process every linked account shares: a few at a time, the rest refused.
     if (this.mediaInFlight >= MEDIA_DOWNLOADS_IN_FLIGHT) {
       throw new HttpError(429, 'Too many file downloads are in progress on the bridge. Try again in a few seconds.')
     }
     this.mediaInFlight++
+    let handedOff = false
     try {
-      return await this.downloadOne(id, chatId, messageId, maxBytes, signal)
+      const overCap = new AbortController()
+      const stop = AbortSignal.any([signal, AbortSignal.timeout(MEDIA_DOWNLOAD_DEADLINE_MS), overCap.signal])
+      const stopped = () => overCap.signal.aborted
+        ? new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
+        : new HttpError(504, 'Downloading the file from Telegram took too long, or the caller went away.')
+      const { client, message, info } = await this.locateMedia(id, chatId, messageId, maxBytes, stop, stopped)
+
+      const headers: Record<string, string> = {
+        'content-type': info.mimeType,
+        'x-media-type': info.mediaType,
+        ...(info.fileName && { 'x-media-file-name': encodeURIComponent(info.fileName) }),
+        ...(info.size !== undefined && { 'x-media-size': String(info.size) }),
+      }
+      const release = () => { this.mediaInFlight-- }
+      const chunks = (async function* () {
+        let sent = 0
+        try {
+          for await (const chunk of client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })) {
+            sent += chunk.length
+            if (sent > maxBytes) {
+              overCap.abort()
+              throw stopped()
+            }
+            yield chunk
+          }
+        }
+        catch (error) {
+          if (stop.aborted) throw stopped()
+          throw error instanceof HttpError ? error : toHttpError(error)
+        }
+        finally {
+          release()
+        }
+      })()
+      handedOff = true
+      return { headers, chunks }
     }
     finally {
-      this.mediaInFlight--
+      if (!handedOff) this.mediaInFlight--
     }
   }
 
-  private async downloadOne(id: string, chatId: string, messageId: number, maxBytes: number, signal: AbortSignal): Promise<{
-    mediaType: MediaInfo['mediaType']
-    mimeType: string
-    fileName?: string
-    size: number
-    data: string
-  }> {
-    // One signal for the whole operation, from entry: the caller disconnecting
-    // (already, or later), the deadline, or the bytes passing the cap (a reported
-    // size is Telegram's claim, not a promise). Every await below is bounded by it.
-    const overCap = new AbortController()
-    const stop = AbortSignal.any([signal, AbortSignal.timeout(MEDIA_DOWNLOAD_DEADLINE_MS), overCap.signal])
-    const stopped = () => overCap.signal.aborted
-      ? new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
-      : new HttpError(504, 'Downloading the file from Telegram took too long, or the caller went away.')
+  /** The message and its media, found through the chat, every await bounded by `stop`. */
+  private async locateMedia(
+    id: string,
+    chatId: string,
+    messageId: number,
+    maxBytes: number,
+    stop: AbortSignal,
+    stopped: () => Error,
+  ): Promise<{ client: TelegramClient, message: Api.Message, info: MediaInfo }> {
     const bounded = <T>(work: Promise<T>): Promise<T> => untilAborted(work, stop, stopped)
 
     await bounded(this.row(id))
@@ -727,33 +759,8 @@ export class SessionManager {
     if (info.size !== undefined && info.size > maxBytes) {
       throw new HttpError(413, `This file is ${formatBytes(info.size)}, over the ${formatBytes(maxBytes)} this connector fetches.`, undefined, { size: info.size })
     }
-
     if (stop.aborted) throw stopped()
-    let data: string | Buffer | undefined
-    try {
-      data = await client.downloadMedia(message, {
-        signal: stop,
-        progressCallback: (downloaded) => {
-          if (Number(downloaded.toString()) > maxBytes) overCap.abort()
-        },
-      })
-    }
-    catch (error) {
-      if (stop.aborted) throw stopped()
-      throw toHttpError(error)
-    }
-    if (!Buffer.isBuffer(data)) throw new HttpError(502, 'Telegram returned no file for this message.')
-    if (data.length > maxBytes) {
-      throw new HttpError(413, `This file is ${formatBytes(data.length)}, over the ${formatBytes(maxBytes)} this connector fetches.`)
-    }
-
-    return {
-      mediaType: info.mediaType,
-      mimeType: info.mimeType,
-      ...(info.fileName && { fileName: info.fileName }),
-      size: data.length,
-      data: data.toString('base64'),
-    }
+    return { client, message, info }
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────────────
