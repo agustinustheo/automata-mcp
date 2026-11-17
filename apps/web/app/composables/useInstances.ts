@@ -130,7 +130,7 @@ export function apiErrorMessage(error: unknown, fallback: string): string {
 export interface ImapCredentials {
   host: string
   port: string
-  security: 'tls' | 'starttls'
+  security: 'tls' | 'starttls' | 'none'
   user: string
   password: string
 }

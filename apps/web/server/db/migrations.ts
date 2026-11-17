@@ -930,4 +930,15 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX invitation_instances_instance ON app.invitation_instances (instance);
     `,
   },
+  {
+    name: '0028_imap_security_none',
+    sql: /* sql */ `
+      -- A mailbox may be reached with no encryption at all ('none'): IMAP on
+      -- a plain socket, STARTTLS never attempted, password sent in clear. The
+      -- owner's explicit choice on the form; 'starttls' still must upgrade.
+      ALTER TABLE app.instances DROP CONSTRAINT instances_imap_security_check;
+      ALTER TABLE app.instances ADD CONSTRAINT instances_imap_security_check
+        CHECK (imap_security IN ('', 'tls', 'starttls', 'none'));
+    `,
+  },
 ]
