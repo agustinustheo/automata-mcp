@@ -41,14 +41,16 @@ const MEDIA_DOWNLOADS_IN_FLIGHT = 3
 /** Downloads one connection runs at once, so one connection cannot hold every slot. */
 const MEDIA_DOWNLOADS_PER_CONNECTION = 1
 /**
- * Longest a followed link may take to deliver its file to the caller (25 MiB at
+ * Longest a media response may take to reach the caller (a 25 MiB link at
  * about 85 KB/s). Past it the response is cut off and its slot given back: a
  * caller that stops reading must not hold a slot, and the file, for ever.
  */
 const MEDIA_DELIVERY_DEADLINE_MS = 5 * 60_000
-/** Least a media response must send in every window before it counts as stalled and is cut off. */
+/** Least a followed link must deliver in every window before it counts as stalled and is cut off (about 2 KB/s). */
 const MEDIA_DELIVERY_MIN_BYTES = 64 * 1024
 const MEDIA_DELIVERY_WINDOW_MS = 30_000
+/** Slice a held buffer is written in, so its delivery is paced and measurable. */
+const DELIVERY_SLICE_BYTES = 64 * 1024
 
 /** Image types every MCP client renders. Anything else goes back as an embedded file. */
 const INLINE_IMAGE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
@@ -301,7 +303,8 @@ export async function pipeMediaToResponse(
   expectedBytes?: number,
 ): Promise<boolean> {
   const res = event.node.res
-  const limit = expectedBytes ?? maxBytes
+  // The cap always holds: a reported size can only lower the limit, never raise it.
+  const limit = Math.min(maxBytes, expectedBytes ?? maxBytes)
   let size = 0
   const counter = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
@@ -314,10 +317,13 @@ export async function pipeMediaToResponse(
       else callback()
     },
   })
+  // A held buffer goes out in slices, each written only once the caller has
+  // taken the last, like a stream: one write of the whole file would queue it
+  // all at once and leave nothing to pace or to measure progress by.
   const source = Buffer.isBuffer(body)
-    ? Readable.from([body])
+    ? Readable.from(slices(body, DELIVERY_SLICE_BYTES))
     : Readable.fromWeb(body as unknown as NodeReadableStream<Uint8Array>)
-  const guard = deliveryGuard(event)
+  const guard = deliveryGuard(event, { stall: true })
   try {
     await pipeline(source, counter, res, { signal: guard.signal })
     return true
@@ -331,26 +337,38 @@ export async function pipeMediaToResponse(
   }
 }
 
+function* slices(data: Buffer, size: number): Generator<Buffer> {
+  for (let at = 0; at < data.length; at += size) yield data.subarray(at, at + size)
+}
+
 /**
- * When a media response must stop: the caller went away, `MEDIA_DELIVERY_DEADLINE_MS`
- * passed, or fewer than `MEDIA_DELIVERY_MIN_BYTES` reached the connection in a
- * `MEDIA_DELIVERY_WINDOW_MS` window — a caller reading a trickle would
- * otherwise hold its slot, and the file, for the whole deadline. Measured on
- * the socket, so it covers bytes written by anyone (this pipe, or the MCP
- * toolkit writing an inline result). `stop()` clears the timers.
+ * When a media response must stop: the caller went away, or
+ * `MEDIA_DELIVERY_DEADLINE_MS` passed — and, with `stall`, when fewer than
+ * `MEDIA_DELIVERY_MIN_BYTES` were taken by the connection in a
+ * `MEDIA_DELIVERY_WINDOW_MS` window, so a caller reading a trickle cannot hold
+ * its slot, and the file, for the whole deadline.
+ *
+ * Progress is what the kernel accepted (`bytesWritten` less what Node still
+ * queues), never what was handed to Node: a queued write is not delivered.
+ * That only measures delivery when writes are paced by backpressure, as
+ * `pipeMediaToResponse`'s are; an inline result, which the MCP toolkit writes
+ * in one go after the tool returns (and after any slower call in the same
+ * batch), gets the deadline and the disconnect only. `stop()` clears the timers.
  */
-function deliveryGuard(event: H3Event): { signal: AbortSignal, stop: () => void } {
+function deliveryGuard(event: H3Event, { stall }: { stall: boolean }): { signal: AbortSignal, stop: () => void } {
   const res = event.node.res
   const cut = new AbortController()
-  const written = () => res.socket?.bytesWritten ?? 0
-  let mark = written()
-  const window = setInterval(() => {
-    const now = written()
-    if (now - mark < MEDIA_DELIVERY_MIN_BYTES) cut.abort(new Error('media delivery stalled'))
-    mark = now
-  }, MEDIA_DELIVERY_WINDOW_MS)
+  const accepted = () => (res.socket?.bytesWritten ?? 0) - (res.socket?.writableLength ?? 0)
+  let mark = accepted()
+  const window = stall
+    ? setInterval(() => {
+        const now = accepted()
+        if (now - mark < MEDIA_DELIVERY_MIN_BYTES) cut.abort(new Error('media delivery stalled'))
+        mark = now
+      }, MEDIA_DELIVERY_WINDOW_MS)
+    : undefined
   const deadline = setTimeout(() => cut.abort(new Error('media delivery deadline passed')), MEDIA_DELIVERY_DEADLINE_MS)
-  window.unref?.()
+  window?.unref?.()
   deadline.unref?.()
   return {
     signal: AbortSignal.any([requestAbortSignal(event), cut.signal]),
@@ -364,8 +382,8 @@ function deliveryGuard(event: H3Event): { signal: AbortSignal, stop: () => void 
 /**
  * Keep a slot until this request's response has been sent — for an inline
  * result, whose file sits in the MCP response the toolkit writes after the tool
- * returns — under the same guard as a followed link: a response that stalls or
- * passes the deadline is destroyed, and the slot comes back either way.
+ * returns. A response that outlives the deadline is destroyed (no stall check:
+ * see `deliveryGuard`), and the slot comes back either way.
  */
 function holdUntilDelivered(event: H3Event, release: () => void): void {
   const res = event.node.res
@@ -373,7 +391,7 @@ function holdUntilDelivered(event: H3Event, release: () => void): void {
     release()
     return
   }
-  const guard = deliveryGuard(event)
+  const guard = deliveryGuard(event, { stall: false })
   const onStop = () => res.destroy()
   guard.signal.addEventListener('abort', onStop, { once: true })
   res.once('close', () => {

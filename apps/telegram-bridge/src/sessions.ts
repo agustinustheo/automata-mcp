@@ -719,6 +719,8 @@ export class SessionManager {
         const iterator = client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })[Symbol.asyncIterator]()
         try {
           for (;;) {
+            // Never start another Telegram request for a caller already gone.
+            if (stop.aborted) throw stopped()
             const step = await untilAborted(iterator.next(), stop, stopped, abandon)
             if (step.done) break
             sent += step.value.length

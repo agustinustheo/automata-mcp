@@ -1399,9 +1399,10 @@ export async function findMessageInChats(
 
 /**
  * Whether another, **distinct** message of this account shares this id — in
- * any other chat, or in the same chat in the other direction (sent vs.
- * received). Copies of the same message (same chat, same direction) are not
- * distinct and do not count.
+ * any other chat, in the same chat in the other direction (sent vs.
+ * received), or in the same group from another sender. Copies of the same
+ * message (same chat, direction and sender) are not distinct and do not count;
+ * copies recording the sender differently are refused too, the safe side.
  *
  * A WhatsApp message id is chosen by the sending device, so it is not unique,
  * and evolution-api-reforged's media route ignores the row a caller sends and
@@ -1427,6 +1428,7 @@ export async function messageIdShared(instance: AppInstance, key: MessageKey): P
           AND NOT (
             key->>'remoteJid' IS NOT DISTINCT FROM ${key.remoteJid ?? null}
             AND COALESCE((key->>'fromMe')::boolean, false) = ${Boolean(key.fromMe)}
+            AND key->>'participant' IS NOT DISTINCT FROM ${key.participant ?? null}
           )
       ) AS shared
     `)

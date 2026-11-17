@@ -19,6 +19,11 @@ type TelegramAuth = Extract<McpAuth, { kind: 'telegram' }>
 /** The bridge's own ceiling on one download (`MEDIA_MAX_BYTES` in apps/telegram-bridge/src/http.ts). */
 const BRIDGE_MEDIA_MAX_BYTES = 50 * 1024 * 1024
 
+/** The most this connector fetches from Telegram: the configured cap, or the bridge's ceiling if lower. */
+export function telegramMediaMaxBytes(): number {
+  return Math.min(mediaMaxBytes(), BRIDGE_MEDIA_MAX_BYTES)
+}
+
 /**
  * The synced message's media kind, or a loud refusal: 404 when no such
  * message is synced in this chat, 422 when it carries no media.
