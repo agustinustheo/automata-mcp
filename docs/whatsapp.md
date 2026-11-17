@@ -650,9 +650,11 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   `message_instance_key_id_idx` index below; without it, media downloads answer
   501 on such a server rather than scan the account. Stock 2.3.7 downloads from
   the message the app sends and needs neither.
-- **Not downloadable:** view-once media, and old media WhatsApp no longer holds —
-  Evolution asks the phone to re-upload expired media, which works only while
-  the phone is online and still has it.
+- **Not downloadable:** view-once media; a message whose file reference does
+  not point at WhatsApp's media servers (the stored message is the sender's, and
+  Evolution would fetch whatever address it names — refused with 422); and old
+  media WhatsApp no longer holds — Evolution asks the phone to re-upload expired
+  media, which works only while the phone is online and still has it.
 
 ## Chats addressed by LID (`…@lid`)
 

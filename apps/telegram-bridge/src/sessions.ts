@@ -235,6 +235,12 @@ const NOT_FOUND = new Set(['USERNAME_NOT_OCCUPIED', 'USERNAME_INVALID', 'PHONE_N
 export class SessionManager {
   /** Media downloads running now; see `media`. */
   private mediaInFlight = 0
+  /**
+   * Telegram requests a cut-off download stopped waiting for but which have not
+   * settled yet. They count against the same limit as running downloads, so
+   * cancelling over and over cannot pile up live requests.
+   */
+  private mediaAbandoned = 0
   private readonly sql: Sql
   private readonly config: BridgeConfig
   private readonly locks: SessionLocks
@@ -669,7 +675,7 @@ export class SessionManager {
   }> {
     // A download holds a Telegram connection's attention for its duration, in a
     // process every linked account shares: a few at a time, the rest refused.
-    if (this.mediaInFlight >= MEDIA_DOWNLOADS_IN_FLIGHT) {
+    if (this.mediaInFlight + this.mediaAbandoned >= MEDIA_DOWNLOADS_IN_FLIGHT) {
       throw new HttpError(429, 'Too many file downloads are in progress on the bridge. Try again in a few seconds.')
     }
     this.mediaInFlight++
@@ -680,7 +686,8 @@ export class SessionManager {
       const stopped = () => overCap.signal.aborted
         ? new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
         : new HttpError(504, 'Downloading the file from Telegram took too long, or the caller went away.')
-      const { client, message, info } = await this.locateMedia(id, chatId, messageId, maxBytes, stop, stopped)
+      const abandon = (work: Promise<unknown>) => this.holdAbandoned(work)
+      const { client, message, info } = await this.locateMedia(id, chatId, messageId, maxBytes, stop, stopped, abandon)
 
       const headers: Record<string, string> = {
         'content-type': info.mimeType,
@@ -691,16 +698,16 @@ export class SessionManager {
       const release = () => { this.mediaInFlight-- }
       const chunks = (async function* () {
         let sent = 0
-        // teleproto checks `signal` only between chunk requests; one stalled
-        // request would outlive the deadline and the caller. So every wait for a
-        // chunk is bounded by `stop` too: on abort this stream ends at once and
-        // gives its slot back, and the abandoned request settles on its own —
-        // outside the slot count, bounded by the per-connection budget for
-        // costly tools that every download is charged against.
+        // teleproto checks `signal` only between chunk requests and gives a
+        // chunk request no timeout of its own; one stalled request would
+        // outlive the deadline and the caller. So every wait for a chunk is
+        // bounded by `stop` too: on abort this stream ends at once, and the
+        // request it stops waiting for keeps a place in the download limit
+        // until it settles (`holdAbandoned`).
         const iterator = client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })[Symbol.asyncIterator]()
         try {
           for (;;) {
-            const step = await untilAborted(iterator.next(), stop, stopped)
+            const step = await untilAborted(iterator.next(), stop, stopped, abandon)
             if (step.done) break
             sent += step.value.length
             if (sent > maxBytes) {
@@ -713,7 +720,7 @@ export class SessionManager {
           // throw: a stream cut short must never end as if the file were whole.
           if (stop.aborted) throw stopped()
           // Nor may a short read: teleproto takes any short chunk as the end of
-          // the file. A document's size is exact, so hold it to it.
+          // the file. A document's size, and a photo size's, is exact: hold it to it.
           if (info.exactSize && sent !== info.size) {
             throw new HttpError(502, 'Telegram ended the file early.')
           }
@@ -736,6 +743,27 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Keep a place in the download limit for a request nobody waits for any more,
+   * until it settles — or, if Telegram never answers it, until
+   * `MEDIA_ABANDONED_HOLD_MS` has passed, so one lost answer cannot close the
+   * limit for good. That leaves at most `MEDIA_DOWNLOADS_IN_FLIGHT` hung requests
+   * per hold period, against the costly-tool budget every download is charged to.
+   */
+  private holdAbandoned(work: Promise<unknown>): void {
+    this.mediaAbandoned++
+    let held = true
+    const free = () => {
+      if (!held) return
+      held = false
+      this.mediaAbandoned--
+      clearTimeout(timer)
+    }
+    const timer = setTimeout(free, MEDIA_ABANDONED_HOLD_MS)
+    timer.unref?.()
+    work.then(free, free)
+  }
+
   /** The message and its media, found through the chat, every await bounded by `stop`. */
   private async locateMedia(
     id: string,
@@ -744,8 +772,9 @@ export class SessionManager {
     maxBytes: number,
     stop: AbortSignal,
     stopped: () => Error,
+    abandon: (work: Promise<unknown>) => void,
   ): Promise<{ client: TelegramClient, message: Api.Message, info: MediaInfo }> {
-    const bounded = <T>(work: Promise<T>): Promise<T> => untilAborted(work, stop, stopped)
+    const bounded = <T>(work: Promise<T>): Promise<T> => untilAborted(work, stop, stopped, abandon)
 
     await bounded(this.row(id))
     const rt = this.runtime(id)
@@ -1373,17 +1402,27 @@ function parseResolveQuery(query: string): { username: string } | { phone: strin
 
 /**
  * `work`, or the error `stopped()` makes as soon as `signal` aborts — including
- * when it already has. The work itself runs on; this only stops waiting for it.
+ * when it already has. The work itself runs on; this only stops waiting for it,
+ * and hands it to `abandon` when it is still pending at that point.
  */
-function untilAborted<T>(work: Promise<T>, signal: AbortSignal, stopped: () => Error): Promise<T> {
-  if (signal.aborted) {
-    // The work has started and will settle on its own; its rejection must not
-    // go unhandled (that would take the whole bridge down).
-    work.catch(() => {})
-    return Promise.reject(stopped())
+function untilAborted<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+  stopped: () => Error,
+  abandon: (work: Promise<unknown>) => void,
+): Promise<T> {
+  let settled = false
+  const watched = work.finally(() => { settled = true })
+  // The work has started and will settle on its own; its rejection must not go
+  // unhandled once nobody awaits it (that would take the whole bridge down).
+  watched.catch(() => {})
+  const giveUp = () => {
+    if (!settled) abandon(watched)
+    return stopped()
   }
+  if (signal.aborted) return Promise.reject(giveUp())
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(stopped())
+    const onAbort = () => reject(giveUp())
     signal.addEventListener('abort', onAbort, { once: true })
     work.then(
       (value) => { signal.removeEventListener('abort', onAbort); resolve(value) },
@@ -1396,6 +1435,8 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal, stopped: () => E
 const MEDIA_DOWNLOADS_IN_FLIGHT = 2
 /** One download's deadline, whatever the app's own is. */
 const MEDIA_DOWNLOAD_DEADLINE_MS = 120_000
+/** Longest an abandoned Telegram request keeps its place in the download limit. */
+const MEDIA_ABANDONED_HOLD_MS = 120_000
 
 /**
  * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood
