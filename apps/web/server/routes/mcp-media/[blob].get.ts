@@ -89,7 +89,7 @@ export default defineEventHandler(async (event) => {
       }
       try {
         headers(file.mimeType, file.fileName, file.data.length)
-        record(await pipeMediaToResponse(event, file.data, maxBytes))
+        record(await pipeMediaToResponse(event, file.data, maxBytes, file.data.length))
       }
       finally {
         release()
@@ -119,7 +119,7 @@ export default defineEventHandler(async (event) => {
         // The bridge reports a size only when it is exact (a document's, or the
         // photo size it downloads) and fails a stream that ends short of it.
         headers(opened.meta.mimeType, opened.meta.fileName, opened.meta.size)
-        record(await pipeMediaToResponse(event, opened.body, opened.cap))
+        record(await pipeMediaToResponse(event, opened.body, opened.cap, opened.meta.size))
       }
       finally {
         release()

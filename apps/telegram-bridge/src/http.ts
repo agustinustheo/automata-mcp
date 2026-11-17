@@ -211,6 +211,11 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       return send(res, matching.length > 0 ? { status: 405, body: { error: 'Method not allowed.' } } : { status: 404, body: { error: 'Not found.' } })
     }
 
+    // Lets a long route (media) stop work nobody is waiting for any more. Armed
+    // before the first await, so a caller gone during authorization counts too.
+    const gone = new AbortController()
+    res.once('close', () => { if (!res.writableEnded) gone.abort() })
+
     try {
       const id = route.pattern.exec(path)?.[1] ?? ''
       const bearer = bearerOf(req)
@@ -230,9 +235,6 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       }
 
       const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : undefined
-      // Lets a long route (media) stop work nobody is waiting for any more.
-      const gone = new AbortController()
-      res.once('close', () => { if (!res.writableEnded) gone.abort() })
       const reply = await route.handle({ id, body, query: url.searchParams, signal: gone.signal })
       if (reply.stream) await sendStream(res, reply.status, reply.stream)
       else send(res, reply)

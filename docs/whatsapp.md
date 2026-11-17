@@ -626,9 +626,10 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   `NUXT_MEDIA_MAX_BYTES`. Evolution's
   answer is read with a byte cap, so a file larger than its sender claimed is
   cut off rather than buffered, and at most three downloads run at once per web
-  process, one per connection (more answer 429). A followed link keeps its
-  slot until the file has reached the caller, at most five minutes, so the
-  three bound the files held too. Evolution itself is not bounded by this: it
+  process, one per connection (more answer 429). A download keeps its slot
+  until the file has reached the caller — by link, or inside the tool result —
+  at most five minutes, and is cut off sooner if under 64 KiB reaches the
+  caller in any 30 seconds, so the three bound the files held too. Evolution itself is not bounded by this: it
   downloads and base64-encodes the whole file before answering, whatever its
   size (WhatsApp documents go up to 2 GB, and the sender's stated size may be
   missing or wrong), so size Evolution's memory for the largest files your
