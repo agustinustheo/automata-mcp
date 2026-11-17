@@ -2,7 +2,7 @@
 # Deploys a release of bitsentry/build to bitsentry-mcp on its self-hosted runner,
 # with backup, health check and automatic rollback: deploy/bitsentry/deploy.sh.
 #
-# Triggers: a tag v<upstream>-bitsentry.N pushed (by a person or by the daily sync),
+# Triggers: a tag v<upstream>-bitsentry.N pushed (by a person or by the upstream sync),
 # a GitHub Release published for such a tag, or a manual re-run with a tag.
 name: BitSentry deploy
 
