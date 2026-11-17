@@ -4,6 +4,7 @@ import type { McpAuth } from './mcp-auth'
 import type { InstanceKind } from '#shared/connection'
 import type { LidLinks } from './whatsapp-identity'
 import { canonicalJid, lidLinks, linkedJidOf, phoneNumberOf } from './whatsapp-identity'
+import { isOptInTool } from '#shared/opt-in-tools'
 
 /**
  * Connector token scope: which chats a token may touch, and which tools it may
@@ -142,6 +143,9 @@ export function isToolAllowed(event: H3Event, toolName: string, kind: InstanceKi
   if (auth.kind !== kind) return false
 
   const scope = auth.scope
+  // Opt-in tools are never covered by "all actions": only a tick by name grants
+  // them, so an existing all-actions token does not gain them on upgrade.
+  if (isOptInTool(toolName)) return scope.toolNames.includes(toolName)
   if (scope.allTools) return true
   return scope.toolNames.includes(toolName)
 }

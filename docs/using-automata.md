@@ -105,6 +105,7 @@ comes back.
 | `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching`; `recentHistoryOnly: true` when the account's import was partial |
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20); `recentHistoryOnly: true` when the account's import was partial |
 | `send-text-message` | WhatsApp | **write** | Send text to a chat's full `jid` exactly as `list-chats` / `read-messages` return it (including `…@lid` chats), or to a phone number in international format for someone with no chat yet; bare LID digits are refused; a refusal (e.g. a number not on WhatsApp) comes back with WhatsApp's reason |
+| `download-media` | WhatsApp | read, **opt-in** | The file a message carries — photo, video, voice note, audio, document, sticker — by `jid` and message `id` from `read-messages` (which marks such messages `hasMedia`, with `mediaType`, `mimetype`, `fileName`, `fileSize`). Up to 5 MiB inline (images as images, other files embedded), up to 25 MiB as a 10-minute download link that only the same token can follow; never included in "All actions", ticked separately |
 | `get-telegram-status` | Telegram | read | Whether the account is linked and online, who it is signed in as, and how far sync has got |
 | `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take; 1–200 per page (default 100) |
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
@@ -158,7 +159,9 @@ the connection's dashboard. Which axes appear depends on the kind:
   connection's own kind. Enforced by refusing to register the others for that
   request, so a tool outside scope is not merely hidden from the tool list:
   calling it fails. A new Postgres or Email token starts read-only — the read
-  tools ticked, `run-statement` or `create-email-draft` not.
+  tools ticked, `run-statement` or `create-email-draft` not. **Media downloads**
+  (`download-media`) are opt-in: never included in "All actions", so no token
+  gains them on an upgrade; tick them under *Media downloads* in either mode.
 - **Chats** (WhatsApp and Telegram) — all conversations, or an allowlist. `list-chats` returns
   only allowed conversations; `read-messages` and `send-text-message` refuse
   anything else, naming the chat so the assistant can explain why.

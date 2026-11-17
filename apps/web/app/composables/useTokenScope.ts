@@ -1,10 +1,13 @@
 import { assertNever } from '#shared/connection'
+import { isOptInTool } from '#shared/opt-in-tools'
 
 export interface McpToolInfo {
   name: string
   title: string
   description: string
   readOnly: boolean
+  /** Not covered by "All actions": granted only when ticked by name. See shared/opt-in-tools.ts. */
+  optIn?: boolean
 }
 
 export interface ScopedChat {
@@ -126,8 +129,10 @@ export function describeScope(scope: TokenScope, kind: InstanceKind): string {
       return assertNever(kind, 'connection kind')
   }
 
-  if (scope.all_tools && dataOpen) return 'Full access'
-  return [data, scope.all_tools ? 'all actions' : plural(scope.tool_names.length, 'action')].join(' · ')
+  // Under "All actions" the only names kept are opt-in tools (media downloads).
+  const media = scope.all_tools && scope.tool_names.some(isOptInTool) ? ' + media downloads' : ''
+  if (scope.all_tools && dataOpen) return `Full access${media}`
+  return [data, scope.all_tools ? `all actions${media}` : plural(scope.tool_names.length, 'action')].join(' · ')
 }
 
 /** What the disclaimer field holds when an admin turns it on. Editable from there. */

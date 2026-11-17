@@ -587,6 +587,37 @@ On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see [Pin the
 ports](deploy-railway.md#pin-the-ports)).
 
+## Downloading media
+
+`read-messages` marks a message that carries a file with `hasMedia: true`,
+`mediaType` (`image`, `video`, `video-note`, `audio`, `voice`, `document` or
+`sticker`), `mimetype`, and — when the sender's device said — `fileName` and
+`fileSize`. These keys are additive: a message without a file carries none of
+them. `download-media` fetches the file by the chat's `jid` and the message `id`.
+
+- **Opt-in per token.** Not included in "All actions", so no existing token gains
+  it on an upgrade: tick it under *Media downloads* in the token's scope, in
+  either mode. Chat scope applies as for every read — the chat is checked, then
+  the message is looked up **inside** that chat (Evolution's own media route
+  finds any message of the account by id alone).
+- **Never stored.** Each call downloads the file through Evolution's
+  `/chat/getBase64FromMediaMessage` and hands it straight back.
+- **Small files inline, larger ones by link.** Up to `NUXT_MEDIA_INLINE_MAX_BYTES`
+  (5 MiB) the file is in the tool result — images as images, anything else as an
+  embedded file. Up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) the tool returns a `url`
+  under `/mcp-media/` instead: signed, valid ten minutes, and followed only with
+  the **same** connector token in the `Authorization` header, after the same
+  scope checks run again. It holds no bytes; following it downloads the file
+  then. Larger files are refused with their size. Signing needs
+  `NUXT_WEBHOOK_SECRET` and `NUXT_PUBLIC_APP_URL`; without them only inline
+  delivery works. Behind a proxy that only forwards `/mcp`, forward
+  `/mcp-media/` too.
+- **Costly.** Each call and each followed link counts against the
+  per-connection budget for costly tools (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`).
+- **Not downloadable:** view-once media, and old media WhatsApp no longer holds —
+  Evolution asks the phone to re-upload expired media, which works only while
+  the phone is online and still has it.
+
 ## Chats addressed by LID (`…@lid`)
 
 WhatsApp addresses a person in one of two ways. The familiar one is a

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { McpScope } from './mcp-scope'
+import { isOptInTool } from '#shared/opt-in-tools'
 
 /**
  * One schema for both minting and editing, so the two can never disagree about
@@ -47,7 +48,9 @@ export const disclaimerSchema = z.object({
 export function scopeFromInput(input: ScopeInput): McpScope {
   return {
     allTools: input.all_tools,
-    toolNames: input.all_tools ? [] : dedupe(input.tool_names),
+    // With "all actions", only opt-in tools are kept by name: they are the ones
+    // all_tools does not cover (see shared/opt-in-tools.ts).
+    toolNames: input.all_tools ? dedupe(input.tool_names).filter(isOptInTool) : dedupe(input.tool_names),
     allChats: input.all_chats,
     chatJids: input.all_chats ? [] : dedupe(input.chat_jids),
     allTables: input.all_tables,
