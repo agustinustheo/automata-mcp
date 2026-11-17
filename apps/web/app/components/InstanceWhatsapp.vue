@@ -350,6 +350,24 @@ function restartPairing() {
   resumeQrPoll()
 }
 
+/**
+ * "Scan not working?" under the QR (#258). A scan that fails on the phone —
+ * camera app instead of WhatsApp, device limit, WhatsApp refusing the link —
+ * sends us nothing, so the page cannot tell the user what went wrong; all it
+ * can do is list the usual causes. Collapsed at first so the code stays the
+ * focus, opened once by itself after a couple of minutes with no scan. Opened
+ * only once: a user who closed it has read it.
+ */
+const SCAN_HELP_AFTER_MS = 2 * 60 * 1000
+const scanHelpOpen = ref(false)
+let scanHelpAutoOpened = false
+watch(now, () => {
+  if (scanHelpAutoOpened || mode.value !== 'pairing' || pairingTimedOut.value) return
+  if (Date.now() - pairingStartedAt.value < SCAN_HELP_AFTER_MS) return
+  scanHelpAutoOpened = true
+  scanHelpOpen.value = true
+})
+
 // ── actions ────────────────────────────────────────────────────────────────
 /**
  * Both controls here end the WhatsApp session and send the page back to
@@ -456,7 +474,9 @@ const importHistory = () => backToPairing(
       <CardHeader>
         <CardTitle>Scan to connect</CardTitle>
         <CardDescription>
-          On your phone: WhatsApp → Settings → Linked devices → Link a device.
+          Open WhatsApp on your phone, go to Linked devices (iPhone: Settings → Linked devices;
+          Android: ⋮ menu → Linked devices), tap Link a device, and scan this code.
+          Scan it from inside WhatsApp — the phone's camera app can't link a device.
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-col items-center gap-4 pb-8">
@@ -465,6 +485,35 @@ const importHistory = () => backToPairing(
         <p v-if="qr?.pairingCode" class="text-sm text-muted-foreground">
           Or enter code <code class="font-mono font-medium">{{ qr.pairingCode }}</code> on your phone.
         </p>
+
+        <details
+          class="w-full max-w-sm rounded-md border p-3 text-sm"
+          :open="scanHelpOpen"
+          @toggle="scanHelpOpen = ($event.target as HTMLDetailsElement).open"
+        >
+          <summary class="cursor-pointer font-medium">
+            Scan not working?
+          </summary>
+          <ul class="mt-2 list-disc space-y-1.5 pl-5 text-muted-foreground">
+            <li>
+              Scan from WhatsApp's Linked devices screen, not with the camera app.
+              A camera reads the code but can't link anything.
+            </li>
+            <li>Make sure WhatsApp is up to date and the phone is online.</li>
+            <li>
+              WhatsApp allows a limited number of linked devices. If Linked devices
+              already lists several, remove one you don't use and scan again.
+            </li>
+            <li>
+              Each code lasts under a minute and a new one replaces it here by itself.
+              Scan the one on screen now.
+            </li>
+            <li>
+              If WhatsApp says it couldn't link the device, wait a few minutes before
+              trying again. Many attempts in a row can get a number flagged.
+            </li>
+          </ul>
+        </details>
 
         <p v-if="removalMinutes !== undefined && removalMinutes > 0" class="max-w-sm text-center text-xs text-muted-foreground">
           A connection that isn't paired within an hour of being created is removed automatically.
