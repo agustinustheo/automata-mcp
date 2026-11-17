@@ -25,7 +25,7 @@ Tags `v<upstream package.json version>-bitsentry.<N>` on `bitsentry/build`, e.g.
 
 1. build `local/automata-web:<tag>` and `local/automata-bridge:<tag>` from the tag
 2. back up the `automata` database (`pg_dump -Fc`), the WhatsApp session volume and
-   the compose files to `/opt/backups/deploys/automata/<time>-<tag>/` (last 5 kept)
+   the compose files to `/opt/deploy-backups/automata/<time>-<tag>/` (last 5 kept)
 3. install `docker-compose.yml` from the tag, `docker-compose.override.yml` from here,
    and `docker-compose.release.yml` naming the new images; `docker compose up -d`
 4. health: `/mcp` through Traefik answers 401 to a well-formed unknown token (gate,

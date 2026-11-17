@@ -26,7 +26,7 @@ TAG="${1:?usage: deploy.sh <tag>}"
 
 APP_DIR=/opt/automata
 STATE_DIR=/opt/deploy-state/automata
-BACKUP_ROOT=/opt/backups/deploys/automata
+BACKUP_ROOT=/opt/deploy-backups/automata
 KEEP_BACKUPS=5
 PG_CONTAINER=postgres-postgres-1
 DB=automata
