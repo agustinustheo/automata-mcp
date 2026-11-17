@@ -623,25 +623,37 @@ not marked.
   written to disk. That route answers with the whole file as base64 inside one
   JSON body, so the file is held in memory while it passes through — bounded,
   below — rather than streamed as Telegram's is. The app decodes the base64 as
-  the answer streams in, so one download holds the file about once, plus the
-  base64 copy MCP sends in the result (briefly about twice the file when
-  Evolution's answer arrives compressed or without a length, since the pieces
-  are then joined at the end). Evolution's
+  the answer streams in, so one download holds the file about once (measured
+  peak about 60 MB for a 25 MiB file, including short-lived buffers; briefly
+  about twice the file when Evolution's answer arrives compressed or without a
+  length, since the pieces are then joined at the end); with
+  three downloads at once, plan for about 200 MB of headroom in the web
+  process, or lower `NUXT_MEDIA_MAX_BYTES`. An inline result (5 MiB at most)
+  also holds the base64 copy MCP sends. Evolution's
   answer is read with a byte cap, so a file larger than its sender claimed is
   cut off rather than buffered, and at most three downloads run at once per web
   process, one per connection (more answer 429). A download keeps its slot
   while the file is fetched from Evolution (at most 90 seconds) and then until
-  the tool result has reached the caller (at most five more minutes), so the
-  three bound the files held too. Evolution itself is not bounded by this: it
+  it has reached the caller — by link, or inside the tool result — at most five
+  more minutes, a link cut off sooner if the caller takes under 64 KiB in any
+  30 seconds — so the three bound the files held too. Evolution itself is not bounded by this: it
   downloads and base64-encodes the whole file before answering, whatever its
   size (WhatsApp documents go up to 2 GB, and the sender's stated size may be
   missing or wrong), so size Evolution's memory for the largest files your
   accounts receive.
-- **Returned in the tool result.** Up to `NUXT_MEDIA_INLINE_MAX_BYTES` (5 MiB)
-  the file comes back inside the result — images as images, anything else as
-  an embedded file. Larger files are refused, quoting the size when it is
-  known.
-- **Costly.** Each call counts against the
+- **Small files inline, larger ones by link.** Up to `NUXT_MEDIA_INLINE_MAX_BYTES`
+  (5 MiB) the file is in the tool result — images as images, anything else as an
+  embedded file. Up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) the tool returns a `url`
+  under `/mcp-media/` instead: signed, valid ten minutes, and followed only with
+  the **same** connector token in the `Authorization` header, after the same
+  scope checks run again. It holds no bytes; following it downloads the file
+  then. Larger files are refused, quoting the size when it is known. The link needs a client that can send that header: one that puts the token in
+  the URL path (`/mcp/<token>`) cannot follow it and should ask for
+  `delivery: "inline"`. Links need `NUXT_PUBLIC_APP_URL`; they are sealed with
+  `NUXT_MEDIA_URL_SECRET`, or a random key per process when it is unset (links
+  then end on restart; set it for several replicas). Behind a proxy that only
+  forwards `/mcp`, forward `/mcp-media/` too.
+- **Costly.** Each call and each followed link counts against the
   per-connection budget for costly tools (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`),
   and is recorded in tool-call history like any call.
 - **Message ids that repeat.** evolution-api-reforged (3.x) reloads a message
