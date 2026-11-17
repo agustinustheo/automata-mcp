@@ -10,7 +10,10 @@ import { z } from 'zod'
  * opens the file inline-capped: a reported size over the inline limit is
  * refused as soon as the bridge's headers arrive (413, nothing read), one with
  * no reported size after at most one chunk past it; the answer is then a link,
- * which fetches the file when followed.
+ * which fetches the file when followed. `url` mints the link without asking the
+ * bridge anything — the synced row says only that there is media — so a file
+ * that is self-destructing or over the cap is refused when the link is
+ * followed (charged then, like any followed link), and the description says so.
  */
 export default defineKindTool({
   name: 'download-telegram-media',
@@ -24,7 +27,8 @@ export default defineKindTool({
     + 'a `url` that works for ten minutes when fetched with this connection\'s Authorization header, '
     + 'and only for this token (a client that puts the token in the URL path cannot follow it: use '
     + '`inline`). `delivery` chooses: `auto` (default) inlines small files, `url` always returns a '
-    + 'link, `inline` never does. Self-destructing media is not downloadable, and the account must be '
+    + 'link without fetching the file first (a file that turns out too large or not downloadable is '
+    + 'refused when the link is followed), `inline` never does. Self-destructing media is not downloadable, and the account must be '
     + 'online (get-telegram-status). Fetch only what the task needs: each call downloads the file.',
   annotations: {
     readOnlyHint: true,

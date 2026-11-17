@@ -619,11 +619,12 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   `/chat/getBase64FromMediaMessage` and hands it straight back; nothing is
   written to disk. That route answers with the whole file as base64 inside one
   JSON body, so the file is held in memory while it passes through — bounded,
-  below — rather than streamed as Telegram's is. At its peak one download holds
-  about five copies (the body, its text, the base64 string, the decoded file),
-  so roughly 150 MB at the 25 MiB default; with three downloads at once, plan
-  for about 450 MB of headroom in the web process, or lower
-  `NUXT_MEDIA_MAX_BYTES`. Evolution's
+  below — rather than streamed as Telegram's is. The app decodes the base64 as
+  the answer streams in, so one download holds the file about once (measured
+  peak about 60 MB for a 25 MiB file, including short-lived buffers); with
+  three downloads at once, plan for about 200 MB of headroom in the web
+  process, or lower `NUXT_MEDIA_MAX_BYTES`. An inline result (5 MiB at most)
+  also holds the base64 copy MCP sends. Evolution's
   answer is read with a byte cap, so a file larger than its sender claimed is
   cut off rather than buffered, and at most three downloads run at once per web
   process, one per connection (more answer 429). A download keeps its slot

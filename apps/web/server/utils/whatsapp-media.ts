@@ -135,11 +135,11 @@ function isViewOnceWrapped(message: unknown): boolean {
   return Object.keys(message).some(key => key.startsWith('viewOnceMessage'))
 }
 
+/** Evolution's answer without its `base64` field, which `fetchBase64Media` decodes as it streams. */
 interface EvolutionMedia {
   mediaType?: string
   fileName?: string
   mimetype?: string
-  base64?: string
 }
 
 /** Long enough for a large video through Evolution's own retry (it waits 5 s and tries again). */
@@ -212,9 +212,10 @@ function downloadPayload(media: WhatsappMediaNode): Record<string, unknown> {
  * stored message by `key.id` alone, which is why `findWhatsappMedia` refuses an
  * id another distinct message of the account shares.
  *
- * The answer is read through `fetchCappedJson`, so a file over `maxBytes` — the
- * sender's `fileLength` is only a claim — is cut off while it streams, before it
- * is parsed or decoded. One of this process's media slots is held throughout.
+ * The answer is read through `fetchBase64Media`: the file is decoded from the
+ * answer's base64 as it streams and held once, and one over `maxBytes` — the
+ * sender's `fileLength` is only a claim — is cut off while it streams. One of
+ * this process's media slots is held throughout.
  */
 export async function downloadWhatsappMedia(auth: WhatsappAuth, target: WhatsappMediaTarget, maxBytes: number): Promise<MediaFile> {
   return await withMediaSlot(auth.instance.id, () => fetchWhatsappMedia(auth, target, maxBytes))
@@ -226,9 +227,9 @@ export async function downloadWhatsappMedia(auth: WhatsappAuth, target: Whatsapp
  */
 export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMediaTarget, maxBytes: number): Promise<MediaFile> {
   const evolution = createEvolutionClient(auth.evolution)
-  let answer: EvolutionMedia | null
+  let answer: { fields: EvolutionMedia | null, data: Buffer | undefined }
   try {
-    answer = await fetchCappedJson<EvolutionMedia | null>(
+    answer = await fetchBase64Media<EvolutionMedia>(
       evolution,
       `/chat/getBase64FromMediaMessage/${encodeURIComponent(auth.instance.name)}`,
       {
@@ -238,6 +239,7 @@ export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMed
         // Stop when the MCP client hangs up; the deadline covers the rest.
         signal: requestAbortSignal(),
       },
+      'base64',
       maxBytes,
     )
   }
@@ -270,16 +272,9 @@ export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMed
     })
   }
 
-  if (!answer?.base64) {
+  const { data } = answer
+  if (!data?.length) {
     throw createError({ statusCode: 422, message: 'WhatsApp returned no file for this message.' })
-  }
-
-  const data = Buffer.from(answer.base64, 'base64')
-  if (data.length > maxBytes) {
-    throw createError({
-      statusCode: 413,
-      message: `This file is ${formatBytes(data.length)}, larger than the ${formatBytes(maxBytes)} this connector fetches.`,
-    })
   }
 
   // A message sharing the id may have arrived while Evolution looked it up by
@@ -288,7 +283,7 @@ export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMed
 
   return {
     data,
-    mimeType: cleanMimeType(answer.mimetype ?? target.meta.mimeType),
-    fileName: target.meta.fileName ?? cleanFileName(answer.fileName),
+    mimeType: cleanMimeType(answer.fields?.mimetype ?? target.meta.mimeType),
+    fileName: target.meta.fileName ?? cleanFileName(answer.fields?.fileName),
   }
 }
