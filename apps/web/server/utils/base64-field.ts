@@ -8,7 +8,9 @@
  * over at its peak (the body's bytes, its text, the parsed base64 string, the
  * decoded file). This holds it once: the decoded bytes, plus one chunk in
  * flight. When the answer's length is known the output is allocated once at
- * the size it implies (never above `maxDecoded`), so there is no final copy.
+ * the size it implies (never above `maxDecoded`), so there is no final copy;
+ * without it (compressed, or no Content-Length) the decoded pieces are joined
+ * at the end, briefly about twice the file.
  *
  * No imports, so it can be exercised in plain Node, like `token-bucket.ts`.
  *

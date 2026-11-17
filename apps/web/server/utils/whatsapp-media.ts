@@ -103,31 +103,72 @@ async function assertIdNotShared(auth: WhatsappAuth, row: StoredMessage): Promis
   }
 }
 
-/** Per Evolution base URL: whether it downloads from the payload sent (stock 2.x). */
-const sentPayloadCache = new Map<string, { at: number, value: boolean }>()
+/** Longest the post-download repeated-id check may hold the file and its slot. */
+const ID_RECHECK_DEADLINE_MS = 10_000
+
+async function idRecheck(work: Promise<void>): Promise<void> {
+  const signal = requestAbortSignal()
+  work.catch(() => {})
+  try {
+    await withDeadline(new Promise<void>((resolve, reject) => {
+      if (signal.aborted) return reject(signal.reason)
+      const onAbort = () => reject(signal.reason)
+      signal.addEventListener('abort', onAbort, { once: true })
+      work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+    }), ID_RECHECK_DEADLINE_MS, 'repeated message id re-check')
+  }
+  catch (error) {
+    if (error instanceof DeadlineExceededError) {
+      throw createError({ statusCode: 503, message: 'Reading the message is temporarily unavailable. Try again in a moment.' })
+    }
+    throw error
+  }
+}
+
+/** Per Evolution base URL: whether it downloads from the payload sent (stock 2.x). Bounded, newest kept. */
+const sentPayloadCache = new Map<string, { at: number, value: boolean, ttl: number }>()
+const sentPayloadReads = new Map<string, Promise<boolean>>()
 const ENGINE_CACHE_MS = 10 * 60_000
+/** A probe that failed is retried sooner: the conservative answer it leaves can turn into 501s. */
+const ENGINE_FAILURE_CACHE_MS = 60_000
+const ENGINE_CACHE_MAX = 256
 
 /**
  * Whether this Evolution server downloads media from the payload it is sent
  * (stock 2.x) rather than reloading the message by id (evolution-api-reforged,
- * 3.x). Read from its own root route, cached ten minutes per server; an answer
+ * 3.x). Read from its own root route, cached ten minutes per server (one
+ * minute when the probe failed; at most `ENGINE_CACHE_MAX` servers); an answer
  * that cannot be read counts as "reloads by id", the side that checks.
  */
 async function evolutionUsesSentPayload(auth: WhatsappAuth): Promise<boolean> {
   const key = auth.evolution.baseUrl
   const cached = sentPayloadCache.get(key)
-  if (cached && Date.now() - cached.at < ENGINE_CACHE_MS) return cached.value
-  let value = false
+  if (cached && Date.now() - cached.at < cached.ttl) return cached.value
+  // One probe per server at a time, shared by every caller.
+  const running = sentPayloadReads.get(key)
+  if (running) return await running
+  const read = (async () => {
+    let value = false
+    let ttl = ENGINE_CACHE_MS
+    try {
+      const root = await createEvolutionClient(auth.evolution)<{ version?: unknown }>('/', { timeout: 5_000 })
+      const major = Number.parseInt(String(root?.version ?? ''), 10)
+      value = Number.isFinite(major) && major < 3
+    }
+    catch {
+      value = false
+      ttl = ENGINE_FAILURE_CACHE_MS
+    }
+    rememberBounded(sentPayloadCache, key, { at: Date.now(), value, ttl }, ENGINE_CACHE_MAX)
+    return value
+  })()
+  sentPayloadReads.set(key, read)
   try {
-    const root = await createEvolutionClient(auth.evolution)<{ version?: unknown }>('/', { timeout: 5_000 })
-    const major = Number.parseInt(String(root?.version ?? ''), 10)
-    value = Number.isFinite(major) && major < 3
+    return await read
   }
-  catch {
-    value = false
+  finally {
+    sentPayloadReads.delete(key)
   }
-  sentPayloadCache.set(key, { at: Date.now(), value })
-  return value
 }
 
 function isViewOnceWrapped(message: unknown): boolean {
@@ -278,8 +319,10 @@ export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMed
   }
 
   // A message sharing the id may have arrived while Evolution looked it up by
-  // that id: checked again before the bytes are handed on.
-  if (target.idChecked) await assertIdNotShared(auth, target.row)
+  // that id: checked again before the bytes are handed on. This read holds the
+  // file and a media slot, so it is bounded by a deadline and the caller going
+  // away (the read itself runs on under the pool's own limits, its answer unused).
+  if (target.idChecked) await idRecheck(assertIdNotShared(auth, target.row))
 
   return {
     data,

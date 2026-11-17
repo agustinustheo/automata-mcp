@@ -52,9 +52,9 @@ export default defineKindTool({
     assertChatAllowed(auth.scope, chatId)
     const mediaKind = await findTelegramMedia(auth, chatId, messageId)
     const inlineMax = mediaInlineMaxBytes()
-    const link = () => {
+    const link = (over?: { size?: number }) => {
       const signed = signMediaUrl({ k: 'telegram', i: auth.instance.id, t: auth.tokenId, c: chatId, m: String(messageId) })
-      if (!signed) throw signedUrlUnavailable(undefined, inlineMax)
+      if (!signed) throw signedUrlUnavailable(inlineMax, over)
       return mediaUrlResult({ chatId, messageId, media: mediaKind }, signed.url, signed.expiresAt)
     }
 
@@ -79,7 +79,7 @@ export default defineKindTool({
           message: `This file is over the ${formatBytes(inlineMax)} returned inline. Call again with delivery: "url".`,
         })
       }
-      return link()
+      return link({ size: typeof size === 'number' ? size : undefined })
     }
   },
 })
