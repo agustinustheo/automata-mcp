@@ -320,6 +320,21 @@ the full scan and logs once that the index is missing. Either way, one
 account's listing is read at most once a minute and shared by every page and
 caller.
 
+**Index message ids, for media downloads.** `download-media` checks that no
+other message of the account shares a message id, an index probe with this
+index, and finds the message by id inside its chat. Without it, it refuses on
+evolution-api-reforged rather than read every message of the account, and on
+stock 2.3.7 skips the check but finds the message by walking the chat — slow in
+a large group. Add it on every engine:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_key_id_idx
+  ON "Message" ("instanceId", (key->>'id'));
+```
+
+Any index starting with these two columns counts; the app looks for one every
+ten minutes.
+
 To check that `read-messages` uses it, take your largest account's id from
 `"Instance"` and one of its busy chats:
 
@@ -596,6 +611,58 @@ ports](deploy-railway.md#pin-the-ports)).
 them. They describe what the sender's device reported, and view-once media is
 not marked.
 
+`download-media` fetches the file by the chat's `jid` and the message `id`.
+
+- **Opt-in per token.** Not included in "All actions", so no existing token gains
+  it on an upgrade: tick it under *Media downloads* in the token's scope, in
+  either mode. Chat scope applies as for every read — the chat is checked, then
+  the message is looked up **inside** that chat (Evolution's own media route
+  finds any message of the account by id alone).
+- **Never stored.** Each call downloads the file through Evolution's
+  `/chat/getBase64FromMediaMessage` and hands it straight back; nothing is
+  written to disk. That route answers with the whole file as base64 inside one
+  JSON body, so the file is held in memory while it passes through — bounded,
+  below — rather than streamed as Telegram's is. The app decodes the base64 as
+  the answer streams in, so one download holds the file about once, plus the
+  base64 copy MCP sends in the result (briefly about twice the file when
+  Evolution's answer arrives compressed or without a length, since the pieces
+  are then joined at the end). Evolution's
+  answer is read with a byte cap, so a file larger than its sender claimed is
+  cut off rather than buffered, and at most three downloads run at once per web
+  process, one per connection (more answer 429). A download keeps its slot
+  while the file is fetched from Evolution (at most 90 seconds) and then until
+  the tool result has reached the caller (at most five more minutes), so the
+  three bound the files held too. Evolution itself is not bounded by this: it
+  downloads and base64-encodes the whole file before answering, whatever its
+  size (WhatsApp documents go up to 2 GB, and the sender's stated size may be
+  missing or wrong), so size Evolution's memory for the largest files your
+  accounts receive.
+- **Returned in the tool result.** Up to `NUXT_MEDIA_INLINE_MAX_BYTES` (5 MiB)
+  the file comes back inside the result — images as images, anything else as
+  an embedded file. Larger files are refused, quoting the size when it is
+  known.
+- **Costly.** Each call counts against the
+  per-connection budget for costly tools (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`),
+  and is recorded in tool-call history like any call.
+- **Message ids that repeat.** evolution-api-reforged (3.x) reloads a message
+  by its id alone when downloading, and the id is the sender's choice, so it can
+  repeat. Wherever the `message_instance_key_id_idx` index (see "Indexes on
+  Evolution's tables" above) exists, on any
+  engine, a download is refused (409) when another message of the account
+  shares the id — in another chat, in the other direction, or from another
+  sender in the same group — checked before and again after Evolution answers. Without the
+  index, media downloads answer 501 on a server that does not report a 2.x
+  version, rather than scan the account; stock 2.3.7 downloads from the message
+  the app sends, so there the check is skipped.
+- **Not downloadable:** view-once media; a message whose file reference does
+  not point at WhatsApp's media servers (the stored message is the sender's, and
+  Evolution would fetch whatever address it names — refused with 422); on
+  evolution-api-reforged, a wrapped message (an album item, an edited or a
+  disappearing-chat message: it reloads the stored row by id and does not unwrap
+  it, where stock 2.3.7 downloads the unwrapped node the app sends — 422); and
+  old media WhatsApp no longer holds — Evolution asks the phone to re-upload
+  expired media, which works only while the phone is online and still has it.
+
 ## Chats addressed by LID (`…@lid`)
 
 WhatsApp addresses a person in one of two ways. The familiar one is a
@@ -842,8 +909,9 @@ import carries on in Evolution either way, and the dashboard counts catch up.
 
 Caveats worth knowing before you rely on it:
 
-- **Media is not downloaded.** History gives message records; the bytes still need
-  `getBase64FromMediaMessage` per message.
+- **Media is not downloaded at import.** History gives message records; a file
+  is fetched one message at a time, when asked, by `download-media` (see
+  "Media in messages").
 - **Depth is whatever the phone volunteers.** `syncFullHistory` asks for
   everything; it is not a guarantee of everything.
 - **Groups come too.** `syncFullHistory` overrides Evolution's group filter, so
