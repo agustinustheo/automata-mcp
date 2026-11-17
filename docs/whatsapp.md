@@ -320,6 +320,19 @@ the full scan and logs once that the index is missing. Either way, one
 account's listing is read at most once a minute and shared by every page and
 caller.
 
+**Index message ids, for media downloads on evolution-api-reforged.**
+`download-media` checks that a message id is not also in a chat the token can't
+read, an index probe with this index; without it, it refuses on reforged rather
+than read every message of the account (stock 2.3.7 skips the check):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_key_id_idx
+  ON "Message" ("instanceId", (key->>'id'));
+```
+
+Any index starting with these two columns counts; the app looks for one every
+ten minutes.
+
 To check that `read-messages` uses it, take your largest account's id from
 `"Instance"` and one of its busy chats:
 
@@ -618,7 +631,15 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   then end on restart; set it for several replicas). Behind a proxy that only
   forwards `/mcp`, forward `/mcp-media/` too.
 - **Costly.** Each call and each followed link counts against the
-  per-connection budget for costly tools (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`).
+  per-connection budget for costly tools (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`),
+  and is recorded in tool-call history like any call.
+- **On evolution-api-reforged** (3.x), which reloads a message by its id alone
+  when downloading, a message id is first checked to exist in no chat outside
+  the token's scope — the id is the sender's choice, so it can repeat — and the
+  download is refused (409) when it does. That check needs the
+  `message_instance_key_id_idx` index below; without it, media downloads answer
+  501 on such a server rather than scan the account. Stock 2.3.7 downloads from
+  the message the app sends and needs neither.
 - **Not downloadable:** view-once media, and old media WhatsApp no longer holds —
   Evolution asks the phone to re-upload expired media, which works only while
   the phone is online and still has it.

@@ -714,7 +714,7 @@ export class SessionManager {
       throw new HttpError(422, 'This message carries no downloadable file (self-destructing media is not downloadable).')
     }
     if (info.size !== undefined && info.size > maxBytes) {
-      throw new HttpError(413, `This file is ${formatBytes(info.size)}, over the ${formatBytes(maxBytes)} this connector fetches.`)
+      throw new HttpError(413, `This file is ${formatBytes(info.size)}, over the ${formatBytes(maxBytes)} this connector fetches.`, undefined, { size: info.size })
     }
 
     // Stopped by whichever comes first: the caller disconnecting, the deadline,
@@ -1347,16 +1347,16 @@ function parseResolveQuery(query: string): { username: string } | { phone: strin
   return undefined
 }
 
-/**
- * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood
- * wait, 404 for "no such user", 422 for any other refusal, carrying Telegram's
- * code. Anything that is not an RPC error is rethrown and becomes a 500.
- */
 /** Media downloads one bridge runs at once. */
 const MEDIA_DOWNLOADS_IN_FLIGHT = 2
 /** One download's deadline, whatever the app's own is. */
 const MEDIA_DOWNLOAD_DEADLINE_MS = 120_000
 
+/**
+ * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood
+ * wait, 404 for "no such user", 422 for any other refusal, carrying Telegram's
+ * code. Anything that is not an RPC error is rethrown and becomes a 500.
+ */
 function toHttpError(error: unknown): HttpError {
   const code = describeError(error)
   if (/^FLOOD_(PREMIUM_)?WAIT/.test(code)) {

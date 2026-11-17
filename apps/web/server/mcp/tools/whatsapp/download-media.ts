@@ -18,7 +18,8 @@ import { z } from 'zod'
  * embedded file, as `get-email-attachment` does); above it, up to
  * `mediaMaxBytes`, a URL valid for ten minutes that only this token can follow,
  * which re-runs every check here before fetching. Above that, refused with the
- * size.
+ * size. A size the sender did not give is found out by fetching capped at the
+ * inline limit, so a large file is never downloaded twice.
  */
 export default defineKindTool({
   name: 'download-media',
@@ -78,11 +79,18 @@ export default defineKindTool({
       return link(meta, claimed)
     }
 
-    // The size is a claim: fetch capped at the inline limit when that is all
-    // the caller will accept, at the overall limit otherwise.
-    const file = await downloadWhatsappMedia(auth, target, delivery === 'inline' ? inlineMax : maxBytes)
+    // The size is a claim, or missing: fetch capped at the inline limit. A file
+    // over it is refused (413) mid-stream; `auto` then answers with a link rather
+    // than downloading it whole here and again when the link is followed.
+    let file: MediaFile
+    try {
+      file = await downloadWhatsappMedia(auth, target, inlineMax)
+    }
+    catch (error) {
+      if (httpStatusOf(error) !== 413 || delivery === 'inline') throw error
+      return link(meta, claimed)
+    }
     const fetched = { ...meta, mimeType: file.mimeType, size: file.data.length, ...(file.fileName && { fileName: file.fileName }) }
-    if (file.data.length <= inlineMax) return mediaInlineResult(fetched, file)
-    return link(fetched, file.data.length)
+    return mediaInlineResult(fetched, file)
   },
 })

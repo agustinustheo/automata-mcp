@@ -3,11 +3,14 @@ export class HttpError extends Error {
   readonly status: number
   /** A stable, machine-readable reason for callers that must branch on it. */
   readonly code?: string
+  /** Extra fields for the answer body, for callers that act on them (e.g. a file's `size`). */
+  readonly details?: Record<string, unknown>
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, details?: Record<string, unknown>) {
     super(message)
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 

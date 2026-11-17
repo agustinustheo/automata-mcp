@@ -1,3 +1,6 @@
+import type { McpAuth } from '~~/server/utils/mcp-auth'
+import type { MediaRef } from '~~/server/utils/media'
+
 /**
  * Follow a signed media URL minted by `download-media` / `download-telegram-media`.
  *
@@ -43,23 +46,17 @@ export default defineEventHandler(async (event) => {
   const throttled = await takeMcpBudget(chargesFor(auth, [{ name: tool, args: {} }]))
   if (throttled) return mcpRateLimited(throttled)
 
-  const maxBytes = mediaMaxBytes()
   let file: MediaFile
-  if (auth.kind === 'whatsapp') {
-    const target = await findWhatsappMedia(auth, ref.c, ref.m)
-    if (target.meta.size !== undefined && target.meta.size > maxBytes) {
-      throw createError({ statusCode: 413, statusMessage: 'File larger than this connector fetches.' })
-    }
-    file = await downloadWhatsappMedia(auth, target, maxBytes)
+  let ok = false
+  try {
+    file = await fetchMedia(auth, ref)
+    ok = true
   }
-  else if (auth.kind === 'telegram') {
-    const messageId = Number(ref.m)
-    assertChatAllowed(auth.scope, ref.c)
-    await findTelegramMedia(auth, ref.c, messageId)
-    file = (await downloadTelegramMedia(auth, ref.c, messageId, maxBytes)).file
-  }
-  else {
-    throw createError({ statusCode: 404, statusMessage: 'Not Found' })
+  finally {
+    // Counted and recorded like a call of the tool (name and outcome only), so a
+    // followed link shows in usage and tool-call history too.
+    countToolCall(auth.instance.org, auth.tokenId, tool, ok)
+    recordToolCall(auth, { tool, ok, reason: undefined, userAgent: getRequestHeader(event, 'user-agent') })
   }
 
   setResponseHeaders(event, {
@@ -73,3 +70,25 @@ export default defineEventHandler(async (event) => {
   })
   return file.data
 })
+
+/** The file a ref names, after the same scope checks the tool runs, fetched fresh. */
+async function fetchMedia(auth: McpAuth, ref: MediaRef): Promise<MediaFile> {
+  const maxBytes = mediaMaxBytes()
+  switch (auth.kind) {
+    case 'whatsapp': {
+      const target = await findWhatsappMedia(auth, ref.c, ref.m)
+      if (target.meta.size !== undefined && target.meta.size > maxBytes) {
+        throw createError({ statusCode: 413, statusMessage: 'File larger than this connector fetches.' })
+      }
+      return await downloadWhatsappMedia(auth, target, maxBytes)
+    }
+    case 'telegram': {
+      const messageId = Number(ref.m)
+      assertChatAllowed(auth.scope, ref.c)
+      await findTelegramMedia(auth, ref.c, messageId)
+      return (await downloadTelegramMedia(auth, ref.c, messageId, maxBytes)).file
+    }
+    default:
+      throw createError({ statusCode: 404, statusMessage: 'Not Found' })
+  }
+}

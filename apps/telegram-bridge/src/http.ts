@@ -229,7 +229,7 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
     }
     catch (error) {
       if (error instanceof HttpError) {
-        return send(res, { status: error.status, body: { error: error.message, ...(error.code && { code: error.code }) } })
+        return send(res, { status: error.status, body: { ...error.details, error: error.message, ...(error.code && { code: error.code }) } })
       }
       console.error(`[http] ${route.label} failed: ${describeError(error)}`)
       send(res, { status: 500, body: { error: 'Internal error.' } })

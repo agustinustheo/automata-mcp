@@ -50,9 +50,15 @@ export async function downloadTelegramMedia(
     }
     catch (error) {
       const status = httpStatusOf(error)
-      const said = (error as { data?: { error?: unknown } } | undefined)?.data?.error
+      const data = (error as { data?: { error?: unknown, size?: unknown } } | undefined)?.data
+      const said = data?.error
       if (status === 413) {
-        throw createError({ statusCode: 413, message: typeof said === 'string' ? said : `This file is larger than the ${formatBytes(cap)} this connector fetches.` })
+        throw createError({
+          statusCode: 413,
+          message: typeof said === 'string' ? said : `This file is larger than the ${formatBytes(cap)} this connector fetches.`,
+          // Telegram's reported size, when the bridge refused before downloading.
+          data: typeof data?.size === 'number' ? { size: data.size } : undefined,
+        })
       }
       if (status === 502) {
         throw createError({ statusCode: 502, message: typeof said === 'string' ? said : 'Telegram returned no file for this message.' })

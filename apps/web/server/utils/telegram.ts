@@ -237,7 +237,7 @@ export function createTelegramBridge(creds: TelegramCredentials) {
     media: (chatId: string, messageId: number, maxBytes: number) => fetchCappedJson<BridgeMedia>(client, `${session}/media`, {
       query: { chatId, messageId, maxBytes },
       timeout: BRIDGE_MEDIA_DEADLINE_MS,
-    }, cappedBodyBytes(maxBytes)),
+    }, maxBytes),
     webhook: (url: string, headers: Record<string, string>) => client(`${session}/webhook`, { method: 'PUT', body: { url, headers } }),
   }
 }

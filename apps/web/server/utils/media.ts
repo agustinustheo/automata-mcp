@@ -197,44 +197,52 @@ export class MediaFetchError extends Error {
 }
 
 /**
- * GET or POST through an ofetch client and parse the JSON answer, never reading
- * more than `maxBodyBytes` of it: the count stops the stream before anything is
- * parsed, so an oversized answer costs at most the cap, not its own size. An
- * error answer is read up to 64 KiB and thrown as `MediaFetchError`, carrying
- * the status and parsed body the callers' error mapping expects.
+ * GET or POST through an ofetch client and parse the JSON answer that carries
+ * one file of at most `maxFileBytes`, never reading more than that file's
+ * base64 plus room for the fields around it (`cappedBodyBytes`): the count
+ * stops the stream before anything is parsed, so an oversized answer costs at
+ * most the cap, not its own size, and is refused with 413.
+ *
+ * An error answer is read up to 64 KiB and the rest dropped — a long error page
+ * is still an error, not an oversized file — then thrown as `MediaFetchError`,
+ * carrying the status and parsed body the callers' error mapping expects.
  */
 export async function fetchCappedJson<T>(
   client: typeof $fetch,
   url: string,
   options: Record<string, unknown>,
-  maxBodyBytes: number,
+  maxFileBytes: number,
 ): Promise<T> {
   const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
   const stream = response._data as ReadableStream<Uint8Array> | undefined
-  const limit = response.ok ? maxBodyBytes : 64 * 1024
-  const text = stream ? await readCapped(stream, limit) : ''
-  if (!response.ok) throw new MediaFetchError(response.status, safeJson(text))
-  return JSON.parse(text) as T
+  if (!response.ok) {
+    const text = stream ? (await readCapped(stream, 64 * 1024)).text : ''
+    throw new MediaFetchError(response.status, safeJson(text))
+  }
+  const body = stream ? await readCapped(stream, cappedBodyBytes(maxFileBytes)) : { text: '', truncated: false }
+  if (body.truncated) {
+    throw createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxFileBytes)} this connector fetches.` })
+  }
+  return JSON.parse(body.text) as T
 }
 
-async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Promise<string> {
+/** At most `limit` bytes of a stream as text; past it, the stream is cancelled and `truncated` set. */
+async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Promise<{ text: string, truncated: boolean }> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
-    size += value.byteLength
-    if (size > limit) {
+    if (size + value.byteLength > limit) {
+      chunks.push(value.subarray(0, limit - size))
       await reader.cancel().catch(() => {})
-      throw createError({
-        statusCode: 413,
-        message: `This file is larger than the ${formatBytes(Math.floor((limit - 256 * 1024) * 3 / 4))} this connector fetches.`,
-      })
+      return { text: Buffer.concat(chunks).toString('utf8'), truncated: true }
     }
+    size += value.byteLength
     chunks.push(value)
   }
-  return Buffer.concat(chunks).toString('utf8')
+  return { text: Buffer.concat(chunks).toString('utf8'), truncated: false }
 }
 
 function safeJson(text: string): unknown {
