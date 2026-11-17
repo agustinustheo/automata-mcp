@@ -1376,7 +1376,12 @@ function parseResolveQuery(query: string): { username: string } | { phone: strin
  * when it already has. The work itself runs on; this only stops waiting for it.
  */
 function untilAborted<T>(work: Promise<T>, signal: AbortSignal, stopped: () => Error): Promise<T> {
-  if (signal.aborted) return Promise.reject(stopped())
+  if (signal.aborted) {
+    // The work has started and will settle on its own; its rejection must not
+    // go unhandled (that would take the whole bridge down).
+    work.catch(() => {})
+    return Promise.reject(stopped())
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(stopped())
     signal.addEventListener('abort', onAbort, { once: true })
