@@ -76,13 +76,15 @@ export async function openTelegramMedia(
 
   const { headers, body } = opened
   const fileName = cleanFileName(decodeHeader(headers.get('x-media-file-name')))
-  const size = Number(headers.get('x-media-size'))
+  // Absent stays absent: `Number(null)` is 0, which would read as an empty file.
+  const sizeHeader = headers.get('x-media-size')
+  const size = sizeHeader && /^\d{1,15}$/.test(sizeHeader) ? Number(sizeHeader) : undefined
   return {
     meta: {
       mediaType: headers.get('x-media-type') ?? 'document',
       mimeType: cleanMimeType(headers.get('content-type')),
       ...(fileName && { fileName }),
-      ...(Number.isSafeInteger(size) && size >= 0 && { size }),
+      ...(size !== undefined && { size }),
     },
     body,
     cap,
@@ -122,6 +124,10 @@ export async function downloadTelegramMedia(
       })
     }
     const data = await readStreamCapped(body, cap)
+    // The reported size is exact; a file of any other length is not this file.
+    if (meta.size !== undefined && data.length !== meta.size) {
+      throw createError({ statusCode: 502, message: 'Telegram returned a file of the wrong size.' })
+    }
     return {
       meta: { ...meta, size: data.length },
       file: { data, mimeType: meta.mimeType, ...(meta.fileName && { fileName: meta.fileName }) },

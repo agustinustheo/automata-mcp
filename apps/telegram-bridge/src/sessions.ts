@@ -690,9 +690,7 @@ export class SessionManager {
       if (released) return
       released = true
       this.mediaInFlight--
-      const left = (this.mediaBySession.get(id) ?? 1) - 1
-      if (left > 0) this.mediaBySession.set(id, left)
-      else this.mediaBySession.delete(id)
+      this.leaveSession(id)
     }
     let handedOff = false
     try {
@@ -701,7 +699,7 @@ export class SessionManager {
       const stopped = () => overCap.signal.aborted
         ? new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
         : new HttpError(504, 'Downloading the file from Telegram took too long, or the caller went away.')
-      const abandon = (work: Promise<unknown>) => this.holdAbandoned(work)
+      const abandon = (work: Promise<unknown>) => this.holdAbandoned(id, work)
       const { client, message, info } = await this.locateMedia(id, chatId, messageId, maxBytes, stop, stopped, abandon)
 
       const headers: Record<string, string> = {
@@ -727,6 +725,11 @@ export class SessionManager {
             if (sent > maxBytes) {
               overCap.abort()
               throw stopped()
+            }
+            // Past an exact size is as wrong as short of it, and must fail
+            // before the extra bytes go out, not after.
+            if (info.exactSize && sent > info.size!) {
+              throw new HttpError(502, 'Telegram sent more than the file\'s size.')
             }
             yield step.value
           }
@@ -765,9 +768,12 @@ export class SessionManager {
    * (reconnect failed) or sends it again (reconnected) to be answered then. One
    * still pending after `MEDIA_ABANDONED_WARN_MS` is logged, so a request
    * Telegram leaves unanswered on a live connection is seen, not guessed at.
+   * The account's own place is kept too, so cancelling cannot let one account
+   * hold every slot.
    */
-  private holdAbandoned(work: Promise<unknown>): void {
+  private holdAbandoned(sessionId: string, work: Promise<unknown>): void {
     this.mediaAbandoned++
+    this.mediaBySession.set(sessionId, (this.mediaBySession.get(sessionId) ?? 0) + 1)
     const warn = setTimeout(() => {
       console.warn(`[media] an abandoned Telegram download request has been pending for ${MEDIA_ABANDONED_WARN_MS / 1000}s; it keeps its place in the download limit until it settles`)
     }, MEDIA_ABANDONED_WARN_MS)
@@ -775,8 +781,15 @@ export class SessionManager {
     const free = () => {
       clearTimeout(warn)
       this.mediaAbandoned--
+      this.leaveSession(sessionId)
     }
     work.then(free, free)
+  }
+
+  private leaveSession(sessionId: string): void {
+    const left = (this.mediaBySession.get(sessionId) ?? 1) - 1
+    if (left > 0) this.mediaBySession.set(sessionId, left)
+    else this.mediaBySession.delete(sessionId)
   }
 
   /** The message and its media, found through the chat, every await bounded by `stop`. */

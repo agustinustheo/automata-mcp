@@ -54,6 +54,9 @@ export function mediaInfoOf(media: Api.TypeMessageMedia | undefined): MediaInfo 
  * The size of the photo size teleproto downloads by default: the **last** entry
  * of `sizes` (`Utils.getFileInfo`), which is usually but not always the largest.
  * A progressive size reports its stages; the last stage is the whole image.
+ * Treated as exact (a short or long stream fails with 502), so a teleproto bump
+ * must re-check that `getFileInfo` / `iterDownload` still pick that entry
+ * (checked on teleproto 1.229.0, `utils.getFileInfo` for `Api.Photo`).
  */
 function downloadedPhotoSize(photo: Api.Photo): number | undefined {
   const last = photo.sizes[photo.sizes.length - 1]
