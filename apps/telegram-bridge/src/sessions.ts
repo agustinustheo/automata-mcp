@@ -690,15 +690,25 @@ export class SessionManager {
       const release = () => { this.mediaInFlight-- }
       const chunks = (async function* () {
         let sent = 0
+        // teleproto checks `signal` only between chunk requests; one stalled
+        // request would outlive the deadline and the caller. So every wait for a
+        // chunk is bounded by `stop` too: on abort this stream ends at once and
+        // gives its slot back, and the abandoned request settles on its own.
+        const iterator = client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })[Symbol.asyncIterator]()
         try {
-          for await (const chunk of client.iterDownload(message, { signal: stop, requestSize: 512 * 1024 })) {
-            sent += chunk.length
+          for (;;) {
+            const step = await untilAborted(iterator.next(), stop, stopped)
+            if (step.done) break
+            sent += step.value.length
             if (sent > maxBytes) {
               overCap.abort()
               throw stopped()
             }
-            yield chunk
+            yield step.value
           }
+          // teleproto's loop may simply stop on an aborted signal rather than
+          // throw: a stream cut short must never end as if the file were whole.
+          if (stop.aborted) throw stopped()
         }
         catch (error) {
           if (stop.aborted) throw stopped()
@@ -706,6 +716,8 @@ export class SessionManager {
         }
         finally {
           release()
+          // Not awaited: it queues behind a request that may still be pending.
+          iterator.return?.(undefined).catch(() => {})
         }
       })()
       handedOff = true

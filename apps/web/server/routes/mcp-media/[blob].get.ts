@@ -1,6 +1,3 @@
-import type { McpAuth } from '~~/server/utils/mcp-auth'
-import type { MediaRef } from '~~/server/utils/media'
-
 /**
  * Follow a signed media URL minted by `download-media` / `download-telegram-media`.
  *
@@ -52,77 +49,68 @@ export default defineEventHandler(async (event) => {
     countToolCall(auth.instance.org, auth.tokenId, tool, ok)
     recordToolCall(auth, { tool, ok, reason: undefined, userAgent: getRequestHeader(event, 'user-agent') })
   }
-
-  let served: ServedMedia
-  try {
-    served = await openMedia(auth, ref, record)
-  }
-  catch (error) {
-    record(false)
-    throw error
-  }
-
-  setResponseHeaders(event, {
-    'content-type': served.mimeType,
-    ...(served.length !== undefined && { 'content-length': served.length }),
-    'content-disposition': attachmentDisposition(served.fileName),
+  const headers = (mimeType: string, fileName: string | undefined, length?: number) => setResponseHeaders(event, {
+    'content-type': mimeType,
+    ...(length !== undefined && { 'content-length': length }),
+    'content-disposition': attachmentDisposition(fileName),
     'cache-control': 'no-store, private',
     'x-content-type-options': 'nosniff',
     'content-security-policy': 'default-src \'none\'; sandbox',
     'referrer-policy': 'no-referrer',
   })
-  return served.body
-})
-
-interface ServedMedia {
-  mimeType: string
-  fileName?: string
-  /** Known only for a buffered file; a streamed one goes out chunked. */
-  length?: number
-  body: Buffer | ReadableStream<Uint8Array>
-}
-
-/**
- * The file a ref names, after the same scope checks the tool runs, fetched
- * fresh from its source. Telegram is streamed straight through from the bridge
- * (a media slot held until the stream ends; `record` called then). WhatsApp is
- * one bounded buffer: Evolution's only media route answers with the whole file
- * as base64 in a JSON body, so there is no stream to pass on.
- */
-async function openMedia(auth: McpAuth, ref: MediaRef, record: (ok: boolean) => void): Promise<ServedMedia> {
   const maxBytes = mediaMaxBytes()
+
   switch (auth.kind) {
+    // One bounded buffer: Evolution's only media route answers with the whole
+    // file as base64 in a JSON body, so there is no stream to pass on.
     case 'whatsapp': {
-      const target = await findWhatsappMedia(auth, ref.c, ref.m)
-      if (target.meta.size !== undefined && target.meta.size > maxBytes) {
-        throw createError({ statusCode: 413, statusMessage: 'File larger than this connector fetches.' })
-      }
-      const file = await downloadWhatsappMedia(auth, target, maxBytes)
-      record(true)
-      return { mimeType: file.mimeType, fileName: file.fileName, length: file.data.length, body: file.data }
-    }
-    case 'telegram': {
-      const messageId = Number(ref.m)
-      assertChatAllowed(auth.scope, ref.c)
-      await findTelegramMedia(auth, ref.c, messageId)
-      const release = acquireMediaSlot()
+      let file: MediaFile
       try {
-        const { meta, body, cap } = await openTelegramMedia(auth, ref.c, messageId, maxBytes, requestAbortSignal())
-        return {
-          mimeType: meta.mimeType,
-          fileName: meta.fileName,
-          body: cappedPassThrough(body, cap, (ok) => {
-            release()
-            record(ok)
-          }),
+        const target = await findWhatsappMedia(auth, ref.c, ref.m)
+        if (target.meta.size !== undefined && target.meta.size > maxBytes) {
+          throw createError({ statusCode: 413, statusMessage: 'File larger than this connector fetches.' })
         }
+        file = await downloadWhatsappMedia(auth, target, maxBytes)
       }
       catch (error) {
-        release()
+        record(false)
         throw error
       }
+      record(true)
+      headers(file.mimeType, file.fileName, file.data.length)
+      return file.data
     }
+
+    // Streamed straight through from the bridge: one media slot held until the
+    // pipe ends, however it ends (finished, cut off, or the client gone — which
+    // also aborts the bridge request through `requestAbortSignal`).
+    case 'telegram': {
+      const messageId = Number(ref.m)
+      let release: (() => void) | undefined
+      let opened: Awaited<ReturnType<typeof openTelegramMedia>>
+      try {
+        assertChatAllowed(auth.scope, ref.c)
+        await findTelegramMedia(auth, ref.c, messageId)
+        release = acquireMediaSlot()
+        opened = await openTelegramMedia(auth, ref.c, messageId, maxBytes, requestAbortSignal())
+      }
+      catch (error) {
+        release?.()
+        record(false)
+        throw error
+      }
+      headers(opened.meta.mimeType, opened.meta.fileName)
+      try {
+        record(await pipeMediaToResponse(event, opened.body, opened.cap))
+      }
+      finally {
+        release()
+      }
+      return
+    }
+
     default:
+      record(false)
       throw createError({ statusCode: 404, statusMessage: 'Not Found' })
   }
-}
+})

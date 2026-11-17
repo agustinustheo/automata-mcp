@@ -321,8 +321,8 @@ account's listing is read at most once a minute and shared by every page and
 caller.
 
 **Index message ids, for media downloads on evolution-api-reforged.**
-`download-media` checks that a message id is not also in a chat the token can't
-read, an index probe with this index; without it, it refuses on reforged rather
+`download-media` checks that no other message of the account shares a message
+id, an index probe with this index; without it, it refuses on reforged rather
 than read every message of the account (stock 2.3.7 skips the check):
 
 ```sql
@@ -637,9 +637,10 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   per-connection budget for costly tools (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`),
   and is recorded in tool-call history like any call.
 - **On evolution-api-reforged** (3.x), which reloads a message by its id alone
-  when downloading, a message id is first checked to exist in no chat outside
-  the token's scope — the id is the sender's choice, so it can repeat — and the
-  download is refused (409) when it does. That check needs the
+  when downloading, a message id is first checked to belong to no other message
+  of the account — the id is the sender's choice, so it can repeat — and the
+  download is refused (409) when it does, since Evolution could return the
+  other message's file. That check needs the
   `message_instance_key_id_idx` index below; without it, media downloads answer
   501 on such a server rather than scan the account. Stock 2.3.7 downloads from
   the message the app sends and needs neither.

@@ -34,7 +34,7 @@ export function mediaInfoOf(media: Api.TypeMessageMedia | undefined): MediaInfo 
     const size = Number(document.size.toString())
     return {
       mediaType,
-      mimeType: document.mimeType || 'application/octet-stream',
+      mimeType: cleanMimeType(document.mimeType),
       ...(fileName && { fileName }),
       ...(Number.isSafeInteger(size) && size >= 0 && { size }),
     }
@@ -61,4 +61,14 @@ export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024) * 10) / 10} MB`
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
   return `${bytes} bytes`
+}
+
+/**
+ * A sender-chosen MIME type reduced to `type/subtype`, else octet-stream: it
+ * goes out as a response header, where anything else would be refused by Node
+ * or reinterpreted by a browser.
+ */
+export function cleanMimeType(raw: string | undefined): string {
+  const base = (raw ?? '').split(';')[0]!.trim().toLowerCase()
+  return /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/.test(base) ? base : 'application/octet-stream'
 }

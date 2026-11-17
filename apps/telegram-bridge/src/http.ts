@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { z } from 'zod'
 import type { BridgeConfig } from './config.ts'
 import { digestsEqual, hashKey } from './crypto.ts'
@@ -81,8 +83,8 @@ const sendBody = z.object({
 
 /**
  * The bridge's own ceiling on one media download, whatever the caller asks
- * for: the file is held in memory, base64 in the response, in a process every
- * linked account shares.
+ * for. The file is streamed, not held, but a download still occupies one of
+ * the few media slots of a process every linked account shares.
  */
 const MEDIA_MAX_BYTES = 50 * 1024 * 1024
 
@@ -296,27 +298,42 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
 }
 
 /**
- * Write a streamed answer, waiting for the socket to drain between chunks so a
- * slow reader is never answered by buffering. The first chunk is pulled before
- * the headers are written, so a failure to start still answers as JSON.
+ * Write a streamed answer through `pipeline`, which waits on backpressure,
+ * stops when the socket closes, and ends the producer either way (so its
+ * `finally` — the media slot — always runs). The first chunk is pulled before
+ * the headers are written, so a failure to start still answers as JSON; a
+ * failure after it can only destroy the connection, which the caller reads as
+ * a broken download, never a complete one.
  */
 async function sendStream(res: ServerResponse, status: number, stream: NonNullable<Reply['stream']>): Promise<void> {
   const iterator = stream.chunks[Symbol.asyncIterator]()
-  const first = await iterator.next()
-  res.writeHead(status, { ...stream.headers, 'cache-control': 'no-store' })
+  let headersOut = false
   try {
-    for (let step = first; !step.done; step = await iterator.next()) {
-      if (res.destroyed) break
-      if (!res.write(step.value)) await new Promise<void>(resolve => res.once('drain', resolve))
-    }
-    res.end()
+    const first = await iterator.next()
+    res.writeHead(status, { ...stream.headers, 'cache-control': 'no-store' })
+    headersOut = true
+    const all = (async function* () {
+      if (first.done) return
+      yield first.value
+      for (;;) {
+        const step = await iterator.next()
+        if (step.done) return
+        yield step.value
+      }
+    })()
+    await pipeline(Readable.from(all), res)
   }
   catch (error) {
+    // Before the headers: an ordinary error answer. After: only the connection
+    // can say the download broke.
+    if (!headersOut) throw error
     console.error(`[http] stream ended early: ${describeError(error)}`)
     res.destroy()
   }
   finally {
-    await iterator.return?.().catch(() => {})
+    // Not awaited: it queues behind a chunk request that may still be pending;
+    // the producer gives its slot back on its own abort.
+    iterator.return?.(undefined).catch(() => {})
   }
 }
 

@@ -1179,7 +1179,7 @@ const KEY_ID_INDEX: MessageIndexSpec = {
 
 /**
  * Whether this message database has an index on ("instanceId", key->>'id'),
- * which makes `messageIdOutsideChats` an index probe instead of a scan of the
+ * which makes `messageIdShared` an index probe instead of a scan of the
  * account. Same detection as the chat index: by shape, cached ten minutes.
  */
 export async function messageKeyIdIndexPresent(instance: AppInstance): Promise<boolean> {
@@ -1398,36 +1398,39 @@ export async function findMessageInChats(
 }
 
 /**
- * Whether a message with this id also exists in a chat **outside** `jids`.
+ * Whether another, **distinct** message of this account shares this id — in
+ * any other chat, or in the same chat in the other direction (sent vs.
+ * received). Copies of the same message (same chat, same direction) are not
+ * distinct and do not count.
  *
- * A WhatsApp message id is chosen by the sending device, so it is not unique
- * across chats — and evolution-api-reforged's media route ignores the row a
- * caller sends and reloads the message by `key.id` alone (its unique index is
- * per chat, not per id). When the same id sits in a chat the token cannot
- * read, which copy Evolution downloads is not ours to decide, so the download
- * is refused. Answers a boolean only: nothing about the other chat is read.
+ * A WhatsApp message id is chosen by the sending device, so it is not unique,
+ * and evolution-api-reforged's media route ignores the row a caller sends and
+ * reloads the message by `key.id` alone (its unique index is per chat and
+ * direction, not per id). When the id is shared, which message Evolution
+ * downloads is not ours to decide — another chat's file, in or out of the
+ * token's scope, or the wrong one in this chat — so the download is refused.
+ * Answers a boolean only: nothing about the other message is read.
  *
  * Only call it with `messageKeyIdIndexPresent` true: without that index this is
  * a scan of every message the account holds.
  */
-export async function messageIdOutsideChats(
-  instance: AppInstance,
-  jids: readonly [string, ...string[]],
-  messageId: string,
-): Promise<boolean> {
+export async function messageIdShared(instance: AppInstance, key: MessageKey): Promise<boolean> {
   const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
   try {
-    const [row] = await query(sql => sql<Array<{ outside: boolean }>>`
+    const [row] = await query(sql => sql<Array<{ shared: boolean }>>`
       SELECT EXISTS (
         SELECT 1 FROM "Message"
         WHERE "instanceId" = ${instanceId}
-          AND key->>'id' = ${messageId}
-          AND NOT (key->>'remoteJid' = ANY(${[...jids]}::text[]))
-      ) AS outside
+          AND key->>'id' = ${key.id ?? ''}
+          AND NOT (
+            key->>'remoteJid' IS NOT DISTINCT FROM ${key.remoteJid ?? null}
+            AND COALESCE((key->>'fromMe')::boolean, false) = ${Boolean(key.fromMe)}
+          )
+      ) AS shared
     `)
-    return row?.outside === true
+    return row?.shared === true
   }
   catch (error) {
     throw readFailure('[media]', 'Reading the message is temporarily unavailable', error)
