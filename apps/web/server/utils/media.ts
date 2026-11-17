@@ -222,33 +222,26 @@ export async function openMediaStream(
 
 /**
  * A whole stream as one Buffer, refused with 413 the moment it passes
- * `maxBytes`. For inline results only.
- *
- * A source that stops mid-stream is an error, never a short file. When it stops
- * within `cutWindow` bytes of the cap, it is read as the source enforcing the
- * same cap (the bridge cuts its stream rather than overrun it when the size was
- * not known up front) and answered 413, so `auto` can offer a link; anything
- * earlier is a broken download (502).
+ * `maxBytes`. For inline results only. A source that stops mid-stream is a
+ * broken download (502), never a short file.
  */
-export async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number, cutWindow = 0): Promise<Buffer> {
+export async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<Buffer> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
-  const tooLarge = () => createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxBytes)} this connector fetches.` })
   for (;;) {
     let step: ReadableStreamReadResult<Uint8Array>
     try {
       step = await reader.read()
     }
     catch {
-      if (cutWindow > 0 && size >= maxBytes - cutWindow) throw tooLarge()
       throw createError({ statusCode: 502, message: 'The download broke off before the whole file arrived. Try again.' })
     }
     if (step.done) break
     size += step.value.byteLength
     if (size > maxBytes) {
       await reader.cancel().catch(() => {})
-      throw tooLarge()
+      throw createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxBytes)} this connector fetches.` })
     }
     chunks.push(step.value)
   }

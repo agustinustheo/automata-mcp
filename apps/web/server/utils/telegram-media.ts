@@ -18,8 +18,6 @@ type TelegramAuth = Extract<McpAuth, { kind: 'telegram' }>
 
 /** The bridge's own ceiling on one download (`MEDIA_MAX_BYTES` in apps/telegram-bridge/src/http.ts). */
 const BRIDGE_MEDIA_MAX_BYTES = 50 * 1024 * 1024
-/** The bridge's download chunk (`requestSize` in its `media`): how far short of the cap it may cut. */
-const BRIDGE_CHUNK_BYTES = 512 * 1024
 
 /**
  * The synced message's media kind, or a loud refusal: 404 when no such
@@ -102,8 +100,12 @@ export async function downloadTelegramMedia(
   maxBytes: number,
 ): Promise<{ meta: MediaMeta, file: MediaFile }> {
   return await withMediaSlot(async () => {
-    const { meta, body, cap } = await openTelegramMedia(auth, chatId, messageId, maxBytes, requestAbortSignal())
-    const data = await readStreamCapped(body, cap, BRIDGE_CHUNK_BYTES)
+    // Ask the bridge for one byte more than this read accepts, so a file over
+    // the cap whose size Telegram did not report is caught here — a clean 413
+    // that `auto` turns into a link — before the bridge would cut its stream.
+    const cap = Math.min(maxBytes, BRIDGE_MEDIA_MAX_BYTES - 1)
+    const { meta, body } = await openTelegramMedia(auth, chatId, messageId, cap + 1, requestAbortSignal())
+    const data = await readStreamCapped(body, cap)
     return {
       meta: { ...meta, size: data.length },
       file: { data, mimeType: meta.mimeType, ...(meta.fileName && { fileName: meta.fileName }) },

@@ -307,26 +307,33 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
  */
 async function sendStream(res: ServerResponse, status: number, stream: NonNullable<Reply['stream']>): Promise<void> {
   const iterator = stream.chunks[Symbol.asyncIterator]()
-  const first = await iterator.next()
-  res.writeHead(status, { ...stream.headers, 'cache-control': 'no-store' })
-  const all = (async function* () {
-    if (first.done) return
-    yield first.value
-    for (;;) {
-      const step = await iterator.next()
-      if (step.done) return
-      yield step.value
-    }
-  })()
+  let headersOut = false
   try {
+    const first = await iterator.next()
+    res.writeHead(status, { ...stream.headers, 'cache-control': 'no-store' })
+    headersOut = true
+    const all = (async function* () {
+      if (first.done) return
+      yield first.value
+      for (;;) {
+        const step = await iterator.next()
+        if (step.done) return
+        yield step.value
+      }
+    })()
     await pipeline(Readable.from(all), res)
   }
   catch (error) {
+    // Before the headers: an ordinary error answer. After: only the connection
+    // can say the download broke.
+    if (!headersOut) throw error
     console.error(`[http] stream ended early: ${describeError(error)}`)
     res.destroy()
   }
   finally {
-    await iterator.return?.(undefined).catch(() => {})
+    // Not awaited: it queues behind a chunk request that may still be pending;
+    // the producer gives its slot back on its own abort.
+    iterator.return?.(undefined).catch(() => {})
   }
 }
 
