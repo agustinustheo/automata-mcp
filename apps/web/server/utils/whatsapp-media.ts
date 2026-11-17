@@ -138,6 +138,15 @@ export async function downloadWhatsappMedia(auth: WhatsappAuth, target: Whatsapp
       const status = httpStatusOf(error)
       if (status === 413) throw error
       console.error(`[media] WhatsApp download on connection ${auth.instance.id} failed: Evolution answered ${status ?? (error as Error | undefined)?.name ?? 'nothing'}`)
+      const said = JSON.stringify((error as { data?: unknown } | undefined)?.data ?? '')
+      if (status === 400 && /not of the media type/i.test(said)) {
+        // evolution-api-reforged reloads the stored row and does not unwrap an
+        // album item or an edit the way this app does; say what it is, not "expired".
+        throw createError({
+          statusCode: 422,
+          message: 'This WhatsApp server cannot download this kind of message (an album item or an edited message). Its media is not reachable through this connector.',
+        })
+      }
       if (status === 400) {
         throw createError({
           statusCode: 422,
