@@ -19,6 +19,8 @@ export interface WhatsappMediaTarget {
   /** The media node itself, from that row. */
   media: WhatsappMediaNode
   meta: MediaMeta
+  /** The id was checked to be this message's alone, and is checked again once Evolution has answered. */
+  idChecked: boolean
 }
 
 /**
@@ -43,26 +45,22 @@ export async function findWhatsappMedia(auth: WhatsappAuth, jid: string, message
 
   // An Evolution that reloads the message by id alone (evolution-api-reforged)
   // could hand back another message's file when the sender-chosen id repeats —
-  // in another chat, or in this one in the other direction. Stock 2.x downloads
-  // from the row we send, so needs no check. Otherwise the check runs only
-  // through its index — never as a scan of the account — and fails closed
-  // without it.
-  if (!(await evolutionUsesSentPayload(auth))) {
-    if (!(await messageKeyIdIndexPresent(auth.instance))) {
-      throw createError({
-        statusCode: 501,
-        message: 'This WhatsApp server finds media by message id alone, and its message database lacks the index '
-          + 'needed to check that safely, so media downloads are off here. The operator can add it: see '
-          + 'docs/whatsapp.md "Indexes on Evolution\'s tables".',
-      })
-    }
-    if (!row.key || await messageIdShared(auth.instance, row.key)) {
-      throw createError({
-        statusCode: 409,
-        message: 'Another message on this account has the same id, so this WhatsApp server cannot be trusted to return this one\'s file; it was not downloaded.',
-      })
-    }
+  // in another chat, or in this one in the other direction. So wherever the
+  // index makes it cheap, an id another message shares is refused, whatever
+  // the server says it is: a version string is no proof of how it downloads.
+  // Without the index the check would scan the account, so it is skipped only
+  // on a server that says it downloads from the row we send (stock 2.x), and
+  // anywhere else media downloads are off.
+  const idChecked = await messageKeyIdIndexPresent(auth.instance)
+  if (!idChecked && !(await evolutionUsesSentPayload(auth))) {
+    throw createError({
+      statusCode: 501,
+      message: 'This WhatsApp server finds media by message id alone, and its message database lacks the index '
+        + 'needed to check that safely, so media downloads are off here. The operator can add it: see '
+        + 'docs/whatsapp.md "Indexes on Evolution\'s tables".',
+    })
   }
+  if (idChecked) await assertIdNotShared(auth, row)
 
   const { info, node } = whatsappMediaOf(row.message, row.messageType ?? undefined)
   if (!info || !node) {
@@ -91,6 +89,17 @@ export async function findWhatsappMedia(auth: WhatsappAuth, jid: string, message
       ...(info.fileName && { fileName: info.fileName }),
       ...(info.fileSize !== undefined && { size: info.fileSize }),
     },
+    idChecked,
+  }
+}
+
+/** 409 when another distinct message of the account carries this row's id (an index probe; see `messageIdShared`). */
+async function assertIdNotShared(auth: WhatsappAuth, row: StoredMessage): Promise<void> {
+  if (!row.key || await messageIdShared(auth.instance, row.key)) {
+    throw createError({
+      statusCode: 409,
+      message: 'Another message on this account has the same id, so this WhatsApp server cannot be trusted to return this one\'s file; it was not downloaded.',
+    })
   }
 }
 
@@ -208,65 +217,75 @@ function downloadPayload(media: WhatsappMediaNode): Record<string, unknown> {
  * is parsed or decoded. One of this process's media slots is held throughout.
  */
 export async function downloadWhatsappMedia(auth: WhatsappAuth, target: WhatsappMediaTarget, maxBytes: number): Promise<MediaFile> {
-  return await withMediaSlot(async () => {
-    const evolution = createEvolutionClient(auth.evolution)
-    let answer: EvolutionMedia | null
-    try {
-      answer = await fetchCappedJson<EvolutionMedia | null>(
-        evolution,
-        `/chat/getBase64FromMediaMessage/${encodeURIComponent(auth.instance.name)}`,
-        {
-          method: 'POST',
-          body: { message: { key: target.row.key, message: downloadPayload(target.media) }, convertToMp4: false },
-          timeout: MEDIA_DOWNLOAD_DEADLINE_MS,
-          // Stop when the MCP client hangs up; the deadline covers the rest.
-          signal: requestAbortSignal(),
-        },
-        maxBytes,
-      )
-    }
-    catch (error) {
-      const status = httpStatusOf(error)
-      if (status === 413) throw error
-      console.error(`[media] WhatsApp download on connection ${auth.instance.id} failed: Evolution answered ${status ?? (error as Error | undefined)?.name ?? 'nothing'}`)
-      const said = JSON.stringify((error as { data?: unknown } | undefined)?.data ?? '')
-      if (status === 400 && /not of the media type/i.test(said)) {
-        // evolution-api-reforged reloads the stored row and does not unwrap a
-        // wrapped message the way this app does; say what it is, not "expired".
-        throw createError({
-          statusCode: 422,
-          message: 'This WhatsApp server cannot download this kind of message (a wrapped one: an album item, an edited or a disappearing-chat message). Its media is not reachable through this connector.',
-        })
-      }
-      if (status === 400) {
-        throw createError({
-          statusCode: 422,
-          message: 'WhatsApp could not provide this file. Old media expires on WhatsApp\'s servers and can only be '
-            + 're-fetched while the phone is online and still holds it; check get-connection-status and try again later.',
-        })
-      }
+  return await withMediaSlot(auth.instance.id, () => fetchWhatsappMedia(auth, target, maxBytes))
+}
+
+/**
+ * `downloadWhatsappMedia` without the slot, for a caller that holds one itself
+ * for longer — the signed-URL route keeps it until the file is delivered.
+ */
+export async function fetchWhatsappMedia(auth: WhatsappAuth, target: WhatsappMediaTarget, maxBytes: number): Promise<MediaFile> {
+  const evolution = createEvolutionClient(auth.evolution)
+  let answer: EvolutionMedia | null
+  try {
+    answer = await fetchCappedJson<EvolutionMedia | null>(
+      evolution,
+      `/chat/getBase64FromMediaMessage/${encodeURIComponent(auth.instance.name)}`,
+      {
+        method: 'POST',
+        body: { message: { key: target.row.key, message: downloadPayload(target.media) }, convertToMp4: false },
+        timeout: MEDIA_DOWNLOAD_DEADLINE_MS,
+        // Stop when the MCP client hangs up; the deadline covers the rest.
+        signal: requestAbortSignal(),
+      },
+      maxBytes,
+    )
+  }
+  catch (error) {
+    const status = httpStatusOf(error)
+    if (status === 413) throw error
+    console.error(`[media] WhatsApp download on connection ${auth.instance.id} failed: Evolution answered ${status ?? (error as Error | undefined)?.name ?? 'nothing'}`)
+    const said = JSON.stringify((error as { data?: unknown } | undefined)?.data ?? '')
+    if (status === 400 && /not of the media type/i.test(said)) {
+      // evolution-api-reforged reloads the stored row and does not unwrap a
+      // wrapped message the way this app does; say what it is, not "expired".
       throw createError({
-        statusCode: 503,
-        message: 'The WhatsApp server did not return the file. Check get-connection-status and try again.',
+        statusCode: 422,
+        message: 'This WhatsApp server cannot download this kind of message (a wrapped one: an album item, an edited or a disappearing-chat message). Its media is not reachable through this connector.',
       })
     }
-
-    if (!answer?.base64) {
-      throw createError({ statusCode: 422, message: 'WhatsApp returned no file for this message.' })
-    }
-
-    const data = Buffer.from(answer.base64, 'base64')
-    if (data.length > maxBytes) {
+    if (status === 400) {
       throw createError({
-        statusCode: 413,
-        message: `This file is ${formatBytes(data.length)}, larger than the ${formatBytes(maxBytes)} this connector fetches.`,
+        statusCode: 422,
+        message: 'WhatsApp could not provide this file. Old media expires on WhatsApp\'s servers and can only be '
+          + 're-fetched while the phone is online and still holds it; check get-connection-status and try again later.',
       })
     }
+    throw createError({
+      statusCode: 503,
+      message: 'The WhatsApp server did not return the file. Check get-connection-status and try again.',
+    })
+  }
 
-    return {
-      data,
-      mimeType: cleanMimeType(answer.mimetype ?? target.meta.mimeType),
-      fileName: target.meta.fileName ?? cleanFileName(answer.fileName),
-    }
-  })
+  if (!answer?.base64) {
+    throw createError({ statusCode: 422, message: 'WhatsApp returned no file for this message.' })
+  }
+
+  const data = Buffer.from(answer.base64, 'base64')
+  if (data.length > maxBytes) {
+    throw createError({
+      statusCode: 413,
+      message: `This file is ${formatBytes(data.length)}, larger than the ${formatBytes(maxBytes)} this connector fetches.`,
+    })
+  }
+
+  // A message sharing the id may have arrived while Evolution looked it up by
+  // that id: checked again before the bytes are handed on.
+  if (target.idChecked) await assertIdNotShared(auth, target.row)
+
+  return {
+    data,
+    mimeType: cleanMimeType(answer.mimetype ?? target.meta.mimeType),
+    fileName: target.meta.fileName ?? cleanFileName(answer.fileName),
+  }
 }

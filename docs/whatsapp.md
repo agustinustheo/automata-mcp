@@ -320,10 +320,12 @@ the full scan and logs once that the index is missing. Either way, one
 account's listing is read at most once a minute and shared by every page and
 caller.
 
-**Index message ids, for media downloads on evolution-api-reforged.**
-`download-media` checks that no other message of the account shares a message
-id, an index probe with this index; without it, it refuses on reforged rather
-than read every message of the account (stock 2.3.7 skips the check):
+**Index message ids, for media downloads.** `download-media` checks that no
+other message of the account shares a message id, an index probe with this
+index, and finds the message by id inside its chat. Without it, it refuses on
+evolution-api-reforged rather than read every message of the account, and on
+stock 2.3.7 skips the check but finds the message by walking the chat — slow in
+a large group. Add it on every engine:
 
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_key_id_idx
@@ -624,9 +626,13 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   `NUXT_MEDIA_MAX_BYTES`. Evolution's
   answer is read with a byte cap, so a file larger than its sender claimed is
   cut off rather than buffered, and at most three downloads run at once per web
-  process (more answer 429). Those three are shared by every organization on
-  the deployment, like the other per-process bounds; each connection is still
-  held to its own costly-tool budget.
+  process, one per connection (more answer 429). A followed link keeps its
+  slot until the file has reached the caller, at most five minutes, so the
+  three bound the files held too. Evolution itself is not bounded by this: it
+  downloads and base64-encodes the whole file before answering, whatever its
+  size (WhatsApp documents go up to 2 GB, and the sender's stated size may be
+  missing or wrong), so size Evolution's memory for the largest files your
+  accounts receive.
 - **Small files inline, larger ones by link.** Up to `NUXT_MEDIA_INLINE_MAX_BYTES`
   (5 MiB) the file is in the tool result — images as images, anything else as an
   embedded file. Up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) the tool returns a `url`
@@ -642,14 +648,14 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
 - **Costly.** Each call and each followed link counts against the
   per-connection budget for costly tools (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`),
   and is recorded in tool-call history like any call.
-- **On evolution-api-reforged** (3.x), which reloads a message by its id alone
-  when downloading, a message id is first checked to belong to no other message
-  of the account — the id is the sender's choice, so it can repeat — and the
-  download is refused (409) when it does, since Evolution could return the
-  other message's file. That check needs the
-  `message_instance_key_id_idx` index below; without it, media downloads answer
-  501 on such a server rather than scan the account. Stock 2.3.7 downloads from
-  the message the app sends and needs neither.
+- **Message ids that repeat.** evolution-api-reforged (3.x) reloads a message
+  by its id alone when downloading, and the id is the sender's choice, so it can
+  repeat. Wherever the `message_instance_key_id_idx` index below exists, on any
+  engine, a download is refused (409) when another message of the account
+  shares the id, checked before and again after Evolution answers. Without the
+  index, media downloads answer 501 on a server that does not report a 2.x
+  version, rather than scan the account; stock 2.3.7 downloads from the message
+  the app sends, so there the check is skipped.
 - **Not downloadable:** view-once media; a message whose file reference does
   not point at WhatsApp's media servers (the stored message is the sender's, and
   Evolution would fetch whatever address it names — refused with 422); and old

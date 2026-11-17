@@ -28,7 +28,8 @@ import { assertNever } from '#shared/connection'
  * than parsing whatever arrives; the bridge's answer is a byte stream, piped
  * through (`pipeMediaToResponse`) or read capped for an inline result
  * (`readStreamCapped`). At most `MEDIA_DOWNLOADS_IN_FLIGHT` downloads run at
- * once in this process (`acquireMediaSlot`).
+ * once in this process, one per connection (`acquireMediaSlot`), each slot held
+ * until its file has been delivered or the delivery deadline cut it off.
  */
 
 /** How long a signed media URL works. Well under the 15 minutes asked of it. */
@@ -36,6 +37,14 @@ export const MEDIA_URL_TTL_SECONDS = 10 * 60
 
 /** Downloads one process runs at once; more are refused with 429, never queued. */
 const MEDIA_DOWNLOADS_IN_FLIGHT = 3
+/** Downloads one connection runs at once, so one connection cannot hold every slot. */
+const MEDIA_DOWNLOADS_PER_CONNECTION = 1
+/**
+ * Longest a followed link may take to deliver its file to the caller (25 MiB at
+ * about 85 KB/s). Past it the response is cut off and its slot given back: a
+ * caller that stops reading must not hold a slot, and the file, for ever.
+ */
+const MEDIA_DELIVERY_DEADLINE_MS = 5 * 60_000
 
 /** Image types every MCP client renders. Anything else goes back as an embedded file. */
 const INLINE_IMAGE = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
@@ -164,34 +173,46 @@ export function signedUrlUnavailable(size: number | undefined, inlineMax: number
 // ── bounded work ─────────────────────────────────────────────────────────────
 
 let inFlight = 0
+const inFlightByConnection = new Map<string, number>()
 
 /**
- * Take one of this process's few media slots, or refuse with 429; the caller
- * must call the returned release exactly once. A buffered download holds a file
- * several times over while it is decoded, and a streamed one holds a source
- * connection, so the number in flight is what bounds both, whatever the
- * per-minute budgets allow.
+ * Take one of this process's few media slots for this connection, or refuse
+ * with 429; the caller must call the returned release exactly once. A buffered
+ * download holds a file several times over while it is decoded, and a streamed
+ * one holds a source connection, so the number in flight is what bounds both,
+ * whatever the per-minute budgets allow. One connection gets one slot at a
+ * time, so a slow reader on one connection cannot shut every other out.
  */
-export function acquireMediaSlot(): () => void {
+export function acquireMediaSlot(connectionId: string): () => void {
   if (inFlight >= MEDIA_DOWNLOADS_IN_FLIGHT) {
     throw createError({
       statusCode: 429,
       message: 'Too many file downloads are in progress on this server. Try again in a few seconds.',
     })
   }
+  const own = inFlightByConnection.get(connectionId) ?? 0
+  if (own >= MEDIA_DOWNLOADS_PER_CONNECTION) {
+    throw createError({
+      statusCode: 429,
+      message: 'Another file download on this connection is still in progress. Try again when it has finished.',
+    })
+  }
   inFlight++
+  inFlightByConnection.set(connectionId, own + 1)
   let released = false
   return () => {
-    if (!released) {
-      released = true
-      inFlight--
-    }
+    if (released) return
+    released = true
+    inFlight--
+    const left = (inFlightByConnection.get(connectionId) ?? 1) - 1
+    if (left > 0) inFlightByConnection.set(connectionId, left)
+    else inFlightByConnection.delete(connectionId)
   }
 }
 
 /** Run one download in a media slot, released when it settles. */
-export async function withMediaSlot<T>(work: () => Promise<T>): Promise<T> {
-  const release = acquireMediaSlot()
+export async function withMediaSlot<T>(connectionId: string, work: () => Promise<T>): Promise<T> {
+  const release = acquireMediaSlot(connectionId)
   try {
     return await work()
   }
@@ -249,14 +270,16 @@ export async function readStreamCapped(stream: ReadableStream<Uint8Array>, maxBy
 }
 
 /**
- * Pipe a media stream to the HTTP response through `pipeline`, counting bytes:
- * it waits on backpressure (a slow client never makes this process buffer the
- * file), and past `maxBytes`, on a source failure, or when the client goes
- * away, the response is destroyed — the client sees a broken download, never a
- * short file passed off as whole. Answers whether the whole file went out.
- * Headers must be set before calling.
+ * Send a file to the caller through `stream.pipeline`: backpressure (the source
+ * is read only as fast as the caller takes it), a byte cap, and the
+ * connection destroyed on any failure — the source breaking off, passing
+ * `maxBytes`, the caller going away, or `MEDIA_DELIVERY_DEADLINE_MS` passing —
+ * so a cut-off file never ends as if it were whole. `body` is the bridge's
+ * stream, or a buffer already held (WhatsApp). Resolves to whether the whole
+ * file was delivered; the caller holds its media slot until then. Headers must
+ * be set before calling.
  */
-export async function pipeMediaToResponse(event: H3Event, body: ReadableStream<Uint8Array>, maxBytes: number): Promise<boolean> {
+export async function pipeMediaToResponse(event: H3Event, body: ReadableStream<Uint8Array> | Buffer, maxBytes: number): Promise<boolean> {
   const res = event.node.res
   let size = 0
   const counter = new Transform({
@@ -266,8 +289,12 @@ export async function pipeMediaToResponse(event: H3Event, body: ReadableStream<U
       else callback(null, chunk)
     },
   })
+  const source = Buffer.isBuffer(body)
+    ? Readable.from([body])
+    : Readable.fromWeb(body as unknown as NodeReadableStream<Uint8Array>)
+  const signal = AbortSignal.any([requestAbortSignal(event), AbortSignal.timeout(MEDIA_DELIVERY_DEADLINE_MS)])
   try {
-    await pipeline(Readable.fromWeb(body as unknown as NodeReadableStream<Uint8Array>), counter, res)
+    await pipeline(source, counter, res, { signal })
     return true
   }
   catch {

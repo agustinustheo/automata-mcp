@@ -241,6 +241,8 @@ export class SessionManager {
    * cancelling over and over cannot pile up live requests.
    */
   private mediaAbandoned = 0
+  /** Downloads running now per session, so one account cannot hold every slot. */
+  private readonly mediaBySession = new Map<string, number>()
   private readonly sql: Sql
   private readonly config: BridgeConfig
   private readonly locks: SessionLocks
@@ -678,7 +680,20 @@ export class SessionManager {
     if (this.mediaInFlight + this.mediaAbandoned >= MEDIA_DOWNLOADS_IN_FLIGHT) {
       throw new HttpError(429, 'Too many file downloads are in progress on the bridge. Try again in a few seconds.')
     }
+    if ((this.mediaBySession.get(id) ?? 0) >= MEDIA_DOWNLOADS_PER_SESSION) {
+      throw new HttpError(429, 'Another file download for this account is still in progress. Try again when it has finished.')
+    }
     this.mediaInFlight++
+    this.mediaBySession.set(id, (this.mediaBySession.get(id) ?? 0) + 1)
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      this.mediaInFlight--
+      const left = (this.mediaBySession.get(id) ?? 1) - 1
+      if (left > 0) this.mediaBySession.set(id, left)
+      else this.mediaBySession.delete(id)
+    }
     let handedOff = false
     try {
       const overCap = new AbortController()
@@ -695,7 +710,6 @@ export class SessionManager {
         ...(info.fileName && { 'x-media-file-name': encodeURIComponent((info.fileName as string & { toWellFormed(): string }).toWellFormed()) }),
         ...(info.size !== undefined && { 'x-media-size': String(info.size) }),
       }
-      const release = () => { this.mediaInFlight-- }
       const chunks = (async function* () {
         let sent = 0
         // teleproto checks `signal` only between chunk requests and gives a
@@ -739,28 +753,29 @@ export class SessionManager {
       return { headers, chunks, signal: stop }
     }
     finally {
-      if (!handedOff) this.mediaInFlight--
+      if (!handedOff) release()
     }
   }
 
   /**
    * Keep a place in the download limit for a request nobody waits for any more,
-   * until it settles — or, if Telegram never answers it, until
-   * `MEDIA_ABANDONED_HOLD_MS` has passed, so one lost answer cannot close the
-   * limit for good. That leaves at most `MEDIA_DOWNLOADS_IN_FLIGHT` hung requests
-   * per hold period, against the costly-tool budget every download is charged to.
+   * until it settles — never released on a timer, which would let repeated
+   * cancels pile up live requests. It does settle: teleproto ends every pending
+   * request with Telegram's answer, or, when the connection drops, rejects it
+   * (reconnect failed) or sends it again (reconnected) to be answered then. One
+   * still pending after `MEDIA_ABANDONED_WARN_MS` is logged, so a request
+   * Telegram leaves unanswered on a live connection is seen, not guessed at.
    */
   private holdAbandoned(work: Promise<unknown>): void {
     this.mediaAbandoned++
-    let held = true
+    const warn = setTimeout(() => {
+      console.warn(`[media] an abandoned Telegram download request has been pending for ${MEDIA_ABANDONED_WARN_MS / 1000}s; it keeps its place in the download limit until it settles`)
+    }, MEDIA_ABANDONED_WARN_MS)
+    warn.unref?.()
     const free = () => {
-      if (!held) return
-      held = false
+      clearTimeout(warn)
       this.mediaAbandoned--
-      clearTimeout(timer)
     }
-    const timer = setTimeout(free, MEDIA_ABANDONED_HOLD_MS)
-    timer.unref?.()
     work.then(free, free)
   }
 
@@ -1433,10 +1448,12 @@ function untilAborted<T>(
 
 /** Media downloads one bridge runs at once. */
 const MEDIA_DOWNLOADS_IN_FLIGHT = 2
+/** Media downloads one linked account runs at once. */
+const MEDIA_DOWNLOADS_PER_SESSION = 1
 /** One download's deadline, whatever the app's own is. */
 const MEDIA_DOWNLOAD_DEADLINE_MS = 120_000
-/** Longest an abandoned Telegram request keeps its place in the download limit. */
-const MEDIA_ABANDONED_HOLD_MS = 120_000
+/** When an abandoned Telegram request still pending is logged. */
+const MEDIA_ABANDONED_WARN_MS = 120_000
 
 /**
  * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood
