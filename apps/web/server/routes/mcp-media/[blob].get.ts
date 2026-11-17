@@ -16,22 +16,24 @@ import '#nuxt-mcp-toolkit/tools.mjs'
  * Only then is the file fetched, fresh; nothing was stored when the URL was made.
  *
  * Anything that does not match answers 404, saying no more about a URL than
- * that it leads nowhere — except an expired one, which says so (410), since
- * "call the tool again" is the useful answer and reveals nothing.
+ * that it leads nowhere — except an expired one followed with its own token,
+ * which says so (410), since "call the tool again" is the useful answer then.
+ * Without that token an expired link is a 404 like any other.
  */
 export default defineEventHandler(async (event) => {
   const check = verifyMediaRef(getRouterParam(event, 'blob'))
-  if (!check.ok) {
-    throw createError(check.reason === 'expired'
-      ? { statusCode: 410, statusMessage: 'This download link has expired. Call the download tool again for a new one.' }
-      : { statusCode: 404, statusMessage: 'Not Found' })
-  }
+  if (!check.ok && check.reason === 'invalid') throw createError({ statusCode: 404, statusMessage: 'Not Found' })
   const { ref } = check
 
+  // Expired or not, a link says nothing until its own token is shown: 404 to
+  // anyone else, so a sealed URL without the token cannot even tell it was real.
   const auth = await resolveMcpAuth(event)
   if (!auth) return mcpUnauthorized()
   if (auth.tokenId !== ref.t || auth.instance.id !== ref.i || auth.kind !== ref.k) {
     throw createError({ statusCode: 404, statusMessage: 'Not Found' })
+  }
+  if (!check.ok) {
+    throw createError({ statusCode: 410, statusMessage: 'This download link has expired. Call the download tool again for a new one.' })
   }
 
   const refusal = await mcpLimitRefusal(auth.instance.org, auth.tokenId, auth.limits)

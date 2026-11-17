@@ -70,9 +70,10 @@ export default defineKindTool({
     }
 
     const meta = { jid, messageId, ...target.meta }
-    const link = (described: Record<string, unknown>, size: number | undefined) => {
+    // `over`: the file is known to be over the inline limit (wording of the refusal only).
+    const link = (described: Record<string, unknown>, over?: { size?: number }) => {
       const signed = signMediaUrl({ k: 'whatsapp', i: auth.instance.id, t: auth.tokenId, c: jid, m: messageId })
-      if (!signed) throw signedUrlUnavailable(size, inlineMax)
+      if (!signed) throw signedUrlUnavailable(inlineMax, over)
       return mediaUrlResult(described, signed.url, signed.expiresAt)
     }
 
@@ -83,9 +84,8 @@ export default defineKindTool({
 
     // Known to be large, or the caller asked for a link: no download here — the
     // URL fetches it when followed.
-    if (delivery === 'url' || (delivery === 'auto' && claimed !== undefined && claimed > inlineMax)) {
-      return link(meta, claimed)
-    }
+    if (delivery === 'url') return link(meta)
+    if (delivery === 'auto' && claimed !== undefined && claimed > inlineMax) return link(meta, { size: claimed })
 
     // The size is a claim, or missing: fetch capped at the inline limit. A file
     // over it is refused (413) mid-stream; `auto` then answers with a link rather
@@ -96,8 +96,9 @@ export default defineKindTool({
     }
     catch (error) {
       if (httpStatusOf(error) !== 413) throw error
-      if (delivery === 'inline') throw inlineRefusal(claimed, inlineMax)
-      return link(meta, claimed)
+      // Over the inline cap by its bytes, whatever the sender claimed: no size quoted.
+      if (delivery === 'inline') throw inlineRefusal(undefined, inlineMax)
+      return link(meta, {})
     }
     const fetched = { ...meta, mimeType: file.mimeType, size: file.data.length, ...(file.fileName && { fileName: file.fileName }) }
     return mediaInlineResult(fetched, file)

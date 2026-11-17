@@ -102,9 +102,11 @@ export interface MediaMeta {
 }
 
 /**
- * A MIME type safe to put in a `Content-Type` header and a tool result. Anything
+ * A MIME type safe to put in a `Content-Type` header and a tool result: anything
  * a sender wrote that does not look like `type/subtype` becomes octet-stream, so
- * a crafted value can neither inject a header nor ask a browser to render HTML.
+ * a crafted value cannot inject a header. This is syntax only — `text/html`
+ * passes; the download route's `attachment`, `nosniff` and sandbox CSP headers
+ * are what keep a browser from rendering what it serves.
  */
 export function cleanMimeType(raw: unknown): string {
   if (typeof raw !== 'string') return 'application/octet-stream'
@@ -166,12 +168,16 @@ export function mediaUrlResult(meta: Record<string, unknown>, url: string, expir
   }
 }
 
-/** Refusal when a file needs a URL and this deployment cannot make one. */
-export function signedUrlUnavailable(size: number | undefined, inlineMax: number) {
+/**
+ * Refusal when a link is needed and this deployment cannot make one. `over` is
+ * given only when the file is known to be over the inline limit (with its size
+ * when that is known), so a small file asked for by link is never called large.
+ */
+export function signedUrlUnavailable(inlineMax: number, over?: { size?: number }) {
   console.error('[media] signed URL unavailable: NUXT_PUBLIC_APP_URL is not set')
   return createError({
     statusCode: 501,
-    message: (size !== undefined ? `This file is ${formatBytes(size)}, over the ${formatBytes(inlineMax)} returned inline, and ` : '')
+    message: (over ? `This file is ${over.size !== undefined ? `about ${formatBytes(over.size)}, ` : ''}over the ${formatBytes(inlineMax)} returned inline, and ` : '')
       + 'this server cannot issue download links (its operator has not set NUXT_PUBLIC_APP_URL).',
   })
 }
@@ -567,7 +573,9 @@ export function signMediaUrl(ref: Omit<MediaRef, 'v' | 'e'>, now = Date.now()): 
 
 export type MediaRefCheck =
   | { ok: true, ref: MediaRef }
-  | { ok: false, reason: 'invalid' | 'expired' }
+  | { ok: false, reason: 'invalid' }
+  /** Genuine (it opened) but past its expiry: the ref, so the route can tell only its own token. */
+  | { ok: false, reason: 'expired', ref: MediaRef }
 
 /** Open a sealed blob: authenticated decryption, then shape, then expiry. */
 export function verifyMediaRef(blob: string | undefined, now = Date.now()): MediaRefCheck {
@@ -590,7 +598,7 @@ export function verifyMediaRef(blob: string | undefined, now = Date.now()): Medi
     || typeof ref.m !== 'string' || typeof ref.e !== 'number') {
     return { ok: false, reason: 'invalid' }
   }
-  if (ref.e * 1000 <= now) return { ok: false, reason: 'expired' }
+  if (ref.e * 1000 <= now) return { ok: false, reason: 'expired', ref }
   return { ok: true, ref }
 }
 

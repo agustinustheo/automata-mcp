@@ -74,6 +74,8 @@ export async function openTelegramMedia(
       })
     }
     if (status === 502) {
+      // The bridge answers this deliberately and does not log it; ids only here.
+      console.error(`[media] Telegram download on connection ${auth.instance.id} failed: the bridge answered 502`)
       throw createError({ statusCode: 502, message: typeof said === 'string' ? said : 'Telegram returned no file for this message.' })
     }
     relayBridgeError(error, 'download the file')

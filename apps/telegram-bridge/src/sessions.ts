@@ -681,7 +681,7 @@ export class SessionManager {
       throw new HttpError(429, 'Too many file downloads are in progress on the bridge. Try again in a few seconds.')
     }
     if ((this.mediaBySession.get(id) ?? 0) >= MEDIA_DOWNLOADS_PER_SESSION) {
-      throw new HttpError(429, 'Another file download for this account is still in progress. Try again when it has finished.')
+      throw new HttpError(429, 'Another file download for this account is still in progress (a cancelled one may still be finishing). Try again shortly.')
     }
     this.mediaInFlight++
     this.mediaBySession.set(id, (this.mediaBySession.get(id) ?? 0) + 1)
@@ -810,31 +810,48 @@ export class SessionManager {
     if (telegram) {
       after(MEDIA_ABANDONED_CEILING_MS, () => {
         console.error(`[media] ${sessionId}: an abandoned Telegram download request is still unanswered after ${MEDIA_ABANDONED_CEILING_MS / 60_000} min; tearing down its client to end it`)
-        void this.endClientRequests(sessionId, telegram)
-        after(MEDIA_ABANDONED_TEARDOWN_GRACE_MS, () => {
-          if (held) console.error(`[media] ${sessionId}: an abandoned Telegram download request is still pending after its client was torn down; it keeps its place in the download limit (restart the bridge to clear it)`)
-        })
+        this.endClientRequests(sessionId, telegram, () => held)
+          .catch(error => console.error(`[media] ${sessionId}: ending an unanswered download request failed: ${describeError(error)}`))
+          // Counted from when the teardown attempt is over, however long it took.
+          .finally(() => {
+            if (!held) return
+            after(MEDIA_ABANDONED_TEARDOWN_GRACE_MS, () => {
+              if (held) console.error(`[media] ${sessionId}: an abandoned Telegram download request is still pending after its client was torn down; it keeps its place in the download limit (restart the bridge to clear it)`)
+            })
+          })
       })
     }
     work.then(free, free)
   }
 
   /**
-   * Tear down `client`, which rejects every request pending on it. Through
-   * `reconnect` while the session still runs it, so the session comes back;
-   * directly otherwise, or when that path fails before disposing it.
+   * Tear down `client`, which rejects every request pending on it. While the
+   * session still runs it, through `reconnect` first, so state is saved and the
+   * session comes back — but given only `MEDIA_TEARDOWN_RECONNECT_MS`, since
+   * that path waits on a lock, database reads and any connect in progress, any
+   * of which can stall. Then, while the request is still pending (`stillHeld`),
+   * `client.disconnect()` directly, whatever `reconnect` did: it needs no
+   * database, closes every sender of the client (other data centres' too, which
+   * a dispose that timed out may have left), and is safe to repeat. A
+   * `reconnect` still running carries on and resumes the session.
    */
-  private async endClientRequests(sessionId: string, client: TelegramClient): Promise<void> {
+  private async endClientRequests(sessionId: string, client: TelegramClient, stillHeld: () => boolean): Promise<void> {
     if (this.runtimes.get(sessionId)?.client === client) {
-      try {
-        await this.reconnect(sessionId)
-        return
-      }
-      catch (error) {
-        console.error(`[media] ${sessionId}: reconnect to end an unanswered download request failed (${describeError(error)}); disconnecting its client directly`)
-      }
+      let timer: NodeJS.Timeout | undefined
+      const outcome = await Promise.race([
+        this.reconnect(sessionId).then(() => 'reconnected' as const, (error: unknown) => {
+          console.error(`[media] ${sessionId}: reconnect to end an unanswered download request failed: ${describeError(error)}`)
+          return 'failed' as const
+        }),
+        new Promise<'slow'>((resolve) => {
+          timer = setTimeout(() => resolve('slow'), MEDIA_TEARDOWN_RECONNECT_MS)
+          timer.unref?.()
+        }),
+      ])
+      clearTimeout(timer)
+      if (outcome === 'slow') console.error(`[media] ${sessionId}: reconnect to end an unanswered download request is taking over ${MEDIA_TEARDOWN_RECONNECT_MS / 1000}s; disconnecting the client directly`)
     }
-    if (this.runtimes.get(sessionId)?.client === client || !client.disconnected) {
+    if (stillHeld()) {
       await client.disconnect().catch(error => console.error(`[media] ${sessionId}: disconnecting the client failed: ${describeError(error)}`))
     }
   }
@@ -1526,6 +1543,8 @@ const MEDIA_ABANDONED_WARN_MS = 120_000
 const MEDIA_ABANDONED_CEILING_MS = 10 * 60_000
 /** How long after that teardown a request still pending is reported (it keeps its place). */
 const MEDIA_ABANDONED_TEARDOWN_GRACE_MS = 60_000
+/** How long the teardown waits on `reconnect` before disconnecting the client directly. */
+const MEDIA_TEARDOWN_RECONNECT_MS = 30_000
 
 /**
  * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood

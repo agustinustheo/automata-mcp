@@ -621,17 +621,19 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   JSON body, so the file is held in memory while it passes through — bounded,
   below — rather than streamed as Telegram's is. The app decodes the base64 as
   the answer streams in, so one download holds the file about once (measured
-  peak about 60 MB for a 25 MiB file, including short-lived buffers; about
-  twice the file if Evolution's answer arrives compressed); with
+  peak about 60 MB for a 25 MiB file, including short-lived buffers; briefly
+  about twice the file when Evolution's answer arrives compressed or without a
+  length, since the pieces are then joined at the end); with
   three downloads at once, plan for about 200 MB of headroom in the web
   process, or lower `NUXT_MEDIA_MAX_BYTES`. An inline result (5 MiB at most)
   also holds the base64 copy MCP sends. Evolution's
   answer is read with a byte cap, so a file larger than its sender claimed is
   cut off rather than buffered, and at most three downloads run at once per web
   process, one per connection (more answer 429). A download keeps its slot
-  until the file has reached the caller — by link, or inside the tool result —
-  at most five minutes — and a link is cut off sooner if the caller takes
-  under 64 KiB in any 30 seconds — so the three bound the files held too. Evolution itself is not bounded by this: it
+  while the file is fetched from Evolution (at most 90 seconds) and then until
+  it has reached the caller — by link, or inside the tool result — at most five
+  more minutes, a link cut off sooner if the caller takes under 64 KiB in any
+  30 seconds — so the three bound the files held too. Evolution itself is not bounded by this: it
   downloads and base64-encodes the whole file before answering, whatever its
   size (WhatsApp documents go up to 2 GB, and the sender's stated size may be
   missing or wrong), so size Evolution's memory for the largest files your
@@ -653,7 +655,8 @@ them. `download-media` fetches the file by the chat's `jid` and the message `id`
   and is recorded in tool-call history like any call.
 - **Message ids that repeat.** evolution-api-reforged (3.x) reloads a message
   by its id alone when downloading, and the id is the sender's choice, so it can
-  repeat. Wherever the `message_instance_key_id_idx` index below exists, on any
+  repeat. Wherever the `message_instance_key_id_idx` index (see "Indexes on
+  Evolution's tables" above) exists, on any
   engine, a download is refused (409) when another message of the account
   shares the id — in another chat, in the other direction, or from another
   sender in the same group — checked before and again after Evolution answers. Without the
