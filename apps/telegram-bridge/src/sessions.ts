@@ -699,8 +699,8 @@ export class SessionManager {
       const stopped = () => overCap.signal.aborted
         ? new HttpError(413, `This file is over the ${formatBytes(maxBytes)} this connector fetches.`)
         : new HttpError(504, 'Downloading the file from Telegram took too long, or the caller went away.')
-      const abandon = (work: Promise<unknown>) => this.holdAbandoned(id, work)
-      const { client, message, info } = await this.locateMedia(id, chatId, messageId, maxBytes, stop, stopped, abandon)
+      const { client, message, info } = await this.locateMedia(id, chatId, messageId, maxBytes, stop, stopped)
+      const abandon = (work: Promise<unknown>) => this.holdAbandoned(id, work, client)
 
       const headers: Record<string, string> = {
         'content-type': info.mimeType,
@@ -763,28 +763,33 @@ export class SessionManager {
   }
 
   /**
-   * Keep a place in the download limit for a request nobody waits for any more,
-   * until it settles — so repeated cancels cannot pile up live requests. It
-   * normally does: teleproto ends every pending request with Telegram's answer,
-   * or, when the connection drops, rejects it (reconnect failed) or sends it
-   * again (reconnected) to be answered then. The account's own place is kept
-   * too, so cancelling cannot let one account hold every slot.
+   * Keep a place in the download limit for work nobody waits for any more,
+   * until it settles — so repeated cancels cannot pile up live requests. The
+   * account's own place is kept too, so cancelling cannot let one account hold
+   * every slot. The place is only ever given back by the work settling, never
+   * on a timer: releasing it while the work runs is the pile-up this prevents.
    *
-   * A request Telegram leaves unanswered on a connection that stays up would
-   * hold its place for ever, so it gets a hard ceiling:
+   * A Telegram request (`telegram`, given the client it was made on) normally
+   * settles: teleproto ends every pending request with Telegram's answer, or,
+   * when the connection drops, rejects it (reconnect failed) or sends it again
+   * (reconnected) to be answered then. One Telegram leaves unanswered on a
+   * connection that stays up gets a **hard ceiling on its life**:
    * - logged after `MEDIA_ABANDONED_WARN_MS`;
-   * - after `MEDIA_ABANDONED_CEILING_MS`, the session is reconnected if it still
-   *   runs the client the request was made on. Dropping that client is what
-   *   ends its pending requests (teleproto rejects them on disconnect), so the
-   *   place comes back with the request actually gone;
-   * - if even that has not settled it `MEDIA_ABANDONED_BACKSTOP_MS` later, the
-   *   place is given back anyway, logged as an error: at most one such request
-   *   per bridge slot per ceiling period, never an unbounded pile.
+   * - after `MEDIA_ABANDONED_CEILING_MS`, the client it was made on is torn
+   *   down — through `reconnect` while the session still runs it (state saved,
+   *   session resumed), or directly when it does not or that path fails before
+   *   reaching it (a lock or database read): teleproto's `disconnect` closes
+   *   every sender of the client and rejects their pending requests, which
+   *   settles this one and gives the place back;
+   * - still pending `MEDIA_ABANDONED_TEARDOWN_GRACE_MS` after that, it is
+   *   logged as an error and keeps its place: the bridge fails closed rather
+   *   than lose count of a live request (a restart clears it).
+   * Other work (a database read while locating the message) is only logged:
+   * reconnecting Telegram cannot end it, and the database's own timeouts do.
    */
-  private holdAbandoned(sessionId: string, work: Promise<unknown>): void {
+  private holdAbandoned(sessionId: string, work: Promise<unknown>, telegram?: TelegramClient): void {
     this.mediaAbandoned++
     this.mediaBySession.set(sessionId, (this.mediaBySession.get(sessionId) ?? 0) + 1)
-    const client = this.runtimes.get(sessionId)?.client
     const timers: NodeJS.Timeout[] = []
     const after = (ms: number, run: () => void) => {
       const timer = setTimeout(run, ms)
@@ -800,21 +805,38 @@ export class SessionManager {
       this.leaveSession(sessionId)
     }
     after(MEDIA_ABANDONED_WARN_MS, () => {
-      console.warn(`[media] ${sessionId}: an abandoned Telegram download request has been pending for ${MEDIA_ABANDONED_WARN_MS / 1000}s; it keeps its place in the download limit until it settles`)
+      console.warn(`[media] ${sessionId}: an abandoned download ${telegram ? 'request to Telegram' : 'step'} has been pending for ${MEDIA_ABANDONED_WARN_MS / 1000}s; it keeps its place in the download limit until it settles`)
     })
-    after(MEDIA_ABANDONED_CEILING_MS, () => {
-      const rt = this.runtimes.get(sessionId)
-      if (client && rt?.client === client) {
-        console.error(`[media] ${sessionId}: an abandoned Telegram download request is still unanswered after ${MEDIA_ABANDONED_CEILING_MS / 60_000} min; reconnecting the session to end it`)
-        this.reconnect(sessionId).catch(error => console.error(`[media] ${sessionId}: reconnect to end an unanswered download request failed: ${describeError(error)}`))
-      }
-      after(MEDIA_ABANDONED_BACKSTOP_MS, () => {
-        if (!held) return
-        console.error(`[media] ${sessionId}: an abandoned Telegram download request never settled; giving its place in the download limit back`)
-        free()
+    if (telegram) {
+      after(MEDIA_ABANDONED_CEILING_MS, () => {
+        console.error(`[media] ${sessionId}: an abandoned Telegram download request is still unanswered after ${MEDIA_ABANDONED_CEILING_MS / 60_000} min; tearing down its client to end it`)
+        void this.endClientRequests(sessionId, telegram)
+        after(MEDIA_ABANDONED_TEARDOWN_GRACE_MS, () => {
+          if (held) console.error(`[media] ${sessionId}: an abandoned Telegram download request is still pending after its client was torn down; it keeps its place in the download limit (restart the bridge to clear it)`)
+        })
       })
-    })
+    }
     work.then(free, free)
+  }
+
+  /**
+   * Tear down `client`, which rejects every request pending on it. Through
+   * `reconnect` while the session still runs it, so the session comes back;
+   * directly otherwise, or when that path fails before disposing it.
+   */
+  private async endClientRequests(sessionId: string, client: TelegramClient): Promise<void> {
+    if (this.runtimes.get(sessionId)?.client === client) {
+      try {
+        await this.reconnect(sessionId)
+        return
+      }
+      catch (error) {
+        console.error(`[media] ${sessionId}: reconnect to end an unanswered download request failed (${describeError(error)}); disconnecting its client directly`)
+      }
+    }
+    if (this.runtimes.get(sessionId)?.client === client || !client.disconnected) {
+      await client.disconnect().catch(error => console.error(`[media] ${sessionId}: disconnecting the client failed: ${describeError(error)}`))
+    }
   }
 
   private leaveSession(sessionId: string): void {
@@ -831,14 +853,16 @@ export class SessionManager {
     maxBytes: number,
     stop: AbortSignal,
     stopped: () => Error,
-    abandon: (work: Promise<unknown>) => void,
   ): Promise<{ client: TelegramClient, message: Api.Message, info: MediaInfo }> {
-    const bounded = <T>(work: Promise<T>): Promise<T> => untilAborted(work, stop, stopped, abandon)
+    // A database read only holds its place; a Telegram request also gets the
+    // ceiling that tears its client down (`holdAbandoned`).
+    const bounded = <T>(work: Promise<T>): Promise<T> => untilAborted(work, stop, stopped, w => this.holdAbandoned(id, w))
 
     await bounded(this.row(id))
     const rt = this.runtime(id)
     const client = this.connectedClient(rt)
     const store = new SyncStore(this.sql, id)
+    const boundedTelegram = <T>(work: Promise<T>): Promise<T> => untilAborted(work, stop, stopped, w => this.holdAbandoned(id, w, client))
 
     const chat = await bounded(store.chat(chatId))
     const accessHash = chat?.access_hash ?? (BigInt(chatId) > 0n ? await bounded(store.userAccessHash(chatId)) : null)
@@ -849,7 +873,7 @@ export class SessionManager {
 
     let message: Api.Message | undefined
     try {
-      const [found] = await bounded(client.getMessages(peer, { ids: [messageId] }))
+      const [found] = await boundedTelegram(client.getMessages(peer, { ids: [messageId] }))
       message = found instanceof Api.Message ? found : undefined
     }
     catch (error) {
@@ -1498,10 +1522,10 @@ const MEDIA_DOWNLOADS_PER_SESSION = 1
 const MEDIA_DOWNLOAD_DEADLINE_MS = 120_000
 /** When an abandoned Telegram request still pending is logged. */
 const MEDIA_ABANDONED_WARN_MS = 120_000
-/** When the session is reconnected to end an abandoned request Telegram never answered. */
+/** When the client of an abandoned request Telegram never answered is torn down to end it. */
 const MEDIA_ABANDONED_CEILING_MS = 10 * 60_000
-/** How long after that reconnect its place is given back regardless. */
-const MEDIA_ABANDONED_BACKSTOP_MS = 60_000
+/** How long after that teardown a request still pending is reported (it keeps its place). */
+const MEDIA_ABANDONED_TEARDOWN_GRACE_MS = 60_000
 
 /**
  * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood

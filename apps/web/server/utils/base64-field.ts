@@ -14,9 +14,10 @@
  *
  * Assumptions, refused loudly when broken (`Base64FieldError`, reason
  * `malformed`): the field occurs once, at a point where `"<field>":"` cannot be
- * part of a string (a key); its value holds base64 characters only, with `\/`
- * as the only escape (JSON's optional one); the rest of the object stays under
- * `maxOther` bytes. Past `maxDecoded` decoded bytes: reason `too-large`.
+ * part of a string (a key); its value is padded base64 in whole groups of four
+ * (`=` only at the end), with `\/` as the only escape (JSON's optional one);
+ * the rest of the object stays under `maxOther` bytes. Past `maxDecoded`
+ * decoded bytes: reason `too-large`.
  */
 
 export class Base64FieldError extends Error {
@@ -150,9 +151,9 @@ export class Base64FieldReader {
 
   private finishValue(): void {
     if (this.pendingEscape) throw new Base64FieldError('malformed', 'The file\'s base64 ends on an escape.')
-    if (this.carry.length === 1) throw new Base64FieldError('malformed', 'The file\'s base64 has a stray character.')
-    if (this.carry.length > 0) this.write(Buffer.from(this.carry, 'base64'))
-    this.carry = ''
+    // Whole, padded groups only (what every base64 encoder Evolution uses
+    // writes): a short last group would be decoded leniently, dropping data.
+    if (this.carry.length > 0) throw new Base64FieldError('malformed', 'The file\'s base64 does not end in a whole, padded group.')
   }
 
   private write(bytes: Buffer): void {

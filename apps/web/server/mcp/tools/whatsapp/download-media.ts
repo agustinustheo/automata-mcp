@@ -35,10 +35,11 @@ export default defineKindTool({
     + 'as embedded files, when small enough; a larger file comes back as a `url` that works for '
     + 'ten minutes when fetched with this connection\'s Authorization header, and only for this '
     + 'token (a client that puts the token in the URL path cannot follow it: use `inline`). '
-    + '`delivery` chooses: `auto` (default) inlines small files, `url` always returns a link, '
-    + '`inline` never does. View-once media is not downloadable. Old media may have expired on '
-    + 'WhatsApp\'s servers; it can then be fetched only while the phone is online. Fetch only what '
-    + 'the task needs: each call downloads the file.',
+    + '`delivery` chooses: `auto` (default) inlines small files, `url` always returns a link '
+    + '(the file is fetched when the link is followed), `inline` never does. View-once media is '
+    + 'not downloadable. Old media may have expired on WhatsApp\'s servers; it can then be '
+    + 'fetched only while the phone is online. Fetch only what the task needs: each download — '
+    + 'inline, or a link followed — fetches the file again.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
