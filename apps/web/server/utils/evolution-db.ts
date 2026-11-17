@@ -1373,6 +1373,41 @@ export async function findMessageInChats(
   return rows[0]
 }
 
+/**
+ * Whether a message with this id also exists in a chat **outside** `jids`.
+ *
+ * A WhatsApp message id is chosen by the sending device, so it is not unique
+ * across chats — and evolution-api-reforged's media route ignores the row a
+ * caller sends and reloads the message by `key.id` alone (its unique index is
+ * per chat, not per id). When the same id sits in a chat the token cannot
+ * read, which copy Evolution downloads is not ours to decide, so the download
+ * is refused. Answers a boolean only: nothing about the other chat is read.
+ * Costs what Evolution's own lookup by id costs.
+ */
+export async function messageIdOutsideChats(
+  instance: AppInstance,
+  jids: readonly [string, ...string[]],
+  messageId: string,
+): Promise<boolean> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  try {
+    const [row] = await query(sql => sql<Array<{ outside: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1 FROM "Message"
+        WHERE "instanceId" = ${instanceId}
+          AND key->>'id' = ${messageId}
+          AND NOT (key->>'remoteJid' = ANY(${[...jids]}::text[]))
+      ) AS outside
+    `)
+    return row?.outside === true
+  }
+  catch (error) {
+    throw readFailure('[media]', 'Reading the message is temporarily unavailable', error)
+  }
+}
+
 export interface LidLocalPartOptions {
   /** Only messages with `messageTimestamp` (unix seconds) at or after this. */
   since?: number

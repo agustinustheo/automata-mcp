@@ -38,6 +38,15 @@ export async function findWhatsappMedia(auth: WhatsappAuth, jid: string, message
     })
   }
 
+  // Fails closed: the same id in a chat this token cannot read means Evolution
+  // (reforged reloads by id alone) might hand back that chat's file instead.
+  if (await messageIdOutsideChats(auth.instance, chat.jids, messageId)) {
+    throw createError({
+      statusCode: 409,
+      message: 'Another chat this connector token cannot read holds a message with the same id, so this file cannot be told apart safely and was not downloaded.',
+    })
+  }
+
   const media = whatsappMediaOf(row.message, row.messageType ?? undefined)
   if (!media) {
     throw createError({
@@ -82,9 +91,9 @@ const MEDIA_DOWNLOAD_DEADLINE_MS = 90_000
  *
  * The verified row goes in the body: Evolution 2.3.7 downloads from that
  * content as given; evolution-api-reforged ignores caller content on this route
- * and reloads the stored message by `key.id`, which its migration made unique
- * per account. Either way the message is the one `findWhatsappMedia` found
- * inside the token's chats.
+ * and reloads the stored message by `key.id` alone. That is why
+ * `findWhatsappMedia` refuses an id that also exists in a chat outside the
+ * token's scope: with it, the message Evolution loads is one this token may read.
  *
  * The size the payload claimed was checked before calling; the bytes are
  * checked again here, since a claim is only a claim.
