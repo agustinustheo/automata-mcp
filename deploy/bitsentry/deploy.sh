@@ -59,12 +59,13 @@ mkdir -p "$BACKUP" && chmod 700 "$BACKUP_ROOT" "$BACKUP"
 log "backing up to $BACKUP (previous release: $CURRENT)"
 echo "$CURRENT" > "$BACKUP/previous-tag"
 for f in docker-compose.yml docker-compose.override.yml docker-compose.release.yml; do
-  [ -f "$APP_DIR/$f" ] && cp -p "$APP_DIR/$f" "$BACKUP/$f"
+  if [ -f "$APP_DIR/$f" ]; then cp "$APP_DIR/$f" "$BACKUP/$f"; fi
 done
 ( umask 077; docker exec "$PG_CONTAINER" pg_dump -U postgres -d "$DB" -Fc > "$BACKUP/$DB.dump" )
 docker exec -i "$PG_CONTAINER" pg_restore -l < "$BACKUP/$DB.dump" > /dev/null   # readable, or stop here
+# Read as root inside the container, handed back to this user for the chmod below.
 docker run --rm --network none -v automata_evolution_instances:/v:ro -v "$BACKUP":/out alpine:3.22 \
-  tar czf /out/evolution_instances.tar.gz -C /v .
+  sh -c "tar czf /out/evolution_instances.tar.gz -C /v . && chown $(id -u):$(id -g) /out/evolution_instances.tar.gz"
 chmod -R go-rwx "$BACKUP"
 
 # ── health ───────────────────────────────────────────────────────────────────
