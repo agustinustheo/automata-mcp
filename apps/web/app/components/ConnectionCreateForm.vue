@@ -24,6 +24,11 @@ import {
  * actually connecting, which is not something a refresh should re-do either.
  */
 const kind = defineModel<InstanceKind | undefined>('kind')
+/**
+ * Leave out the "Coming soon" cards. First-run setup sets it: someone choosing
+ * their first connection needs what works today, not what does not exist yet.
+ */
+const props = defineProps<{ hideComingSoon?: boolean }>()
 const emit = defineEmits<{ created: [instance: { id: string, kind: InstanceKind }] }>()
 const label = ref('')
 const busy = ref(false)
@@ -307,7 +312,7 @@ async function create() {
             reads as one that should work.
           -->
           <div
-            v-for="card in group.soon"
+            v-for="card in props.hideComingSoon ? [] : group.soon"
             :key="card.title"
             class="flex h-full items-start gap-3 rounded-lg border border-dashed p-4 opacity-60"
           >

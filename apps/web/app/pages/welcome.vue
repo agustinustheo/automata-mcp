@@ -133,7 +133,11 @@ async function finish() {
 </script>
 
 <template>
-  <div class="mx-auto space-y-8" :class="step === 'pick' || step === 'token' ? 'max-w-5xl' : 'max-w-xl'">
+  <div class="mx-auto max-w-5xl space-y-8">
+    <!--
+      One width for the page, so the header and stepper stay put between steps
+      (and the stepper fits one row); the form-shaped steps narrow themselves.
+    -->
     <div class="flex flex-wrap items-start justify-between gap-4">
       <div>
         <h1 class="font-heading text-2xl font-semibold">
@@ -148,28 +152,47 @@ async function finish() {
       </Button>
     </div>
 
-    <!-- ── progress ──────────────────────────────────────────────────────── -->
-    <ol class="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+    <!--
+      Brand colours, so where you are reads at a glance: done = lime with an ink
+      check, current = ink with a lime numeral and a lime halo, ahead = outline.
+      Lime alone on the cream ground is too faint to carry "current" by itself.
+    -->
+    <ol class="flex flex-wrap items-center gap-x-3 gap-y-3 text-sm">
       <li
         v-for="(s, index) in steps"
         :key="s.id"
-        class="flex items-center gap-2"
-        :class="index === currentIndex ? 'font-medium' : 'text-muted-foreground'"
+        class="flex items-center gap-3"
         :aria-current="index === currentIndex ? 'step' : undefined"
       >
         <span
-          class="flex size-6 shrink-0 items-center justify-center rounded-full border text-xs"
-          :class="index < currentIndex ? 'border-primary bg-primary text-primary-foreground' : index === currentIndex ? 'border-primary' : ''"
+          v-if="index > 0"
+          aria-hidden="true"
+          class="hidden h-0.5 w-6 rounded-full sm:block"
+          :class="index <= currentIndex ? 'bg-foreground' : 'bg-border'"
+        />
+        <span
+          class="flex size-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold transition-colors"
+          :class="index < currentIndex
+            ? 'bg-primary text-primary-foreground'
+            : index === currentIndex
+              ? 'bg-foreground text-primary ring-4 ring-primary/60'
+              : 'border border-border bg-card text-muted-foreground'"
         >
-          <CheckIcon v-if="index < currentIndex" class="size-3.5" />
+          <CheckIcon v-if="index < currentIndex" class="size-4" stroke-width="3" />
           <template v-else>{{ index + 1 }}</template>
         </span>
-        {{ s.title }}
+        <span
+          :class="index === currentIndex
+            ? 'font-semibold text-foreground'
+            : index < currentIndex ? 'text-foreground' : 'text-muted-foreground'"
+        >
+          {{ s.title }}
+        </span>
       </li>
     </ol>
 
     <!-- ── 1–2: pick, then name and credentials ──────────────────────────── -->
-    <section v-if="step === 'pick' || step === 'details'" class="space-y-4">
+    <section v-if="step === 'pick' || step === 'details'" class="space-y-4" :class="step === 'details' ? 'max-w-xl' : ''">
       <div>
         <h2 class="font-heading text-lg font-semibold">
           {{ step === 'pick' ? 'What should Claude connect to?' : 'Name it and add its credentials' }}
@@ -180,11 +203,11 @@ async function finish() {
             : 'Credentials are checked before anything is saved.' }}
         </p>
       </div>
-      <ConnectionCreateForm v-model:kind="kind" @created="created" />
+      <ConnectionCreateForm v-model:kind="kind" hide-coming-soon @created="created" />
     </section>
 
     <!-- ── 3: scan ───────────────────────────────────────────────────────── -->
-    <section v-else-if="step === 'pair' && connectionId" class="space-y-4">
+    <section v-else-if="step === 'pair' && connectionId" class="max-w-xl space-y-4">
       <div>
         <h2 class="font-heading text-lg font-semibold">
           Link your {{ connectionKind === 'telegram' ? 'Telegram account' : 'phone' }}
@@ -252,7 +275,7 @@ async function finish() {
     </section>
 
     <!-- ── 5: update mail (self-hosted only) ─────────────────────────────── -->
-    <section v-else-if="step === 'updates'" class="space-y-4">
+    <section v-else-if="step === 'updates'" class="max-w-xl space-y-4">
       <Card>
         <CardHeader>
           <div class="flex items-center gap-2">
