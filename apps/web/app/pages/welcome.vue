@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckIcon, MailIcon } from '@lucide/vue'
+import { ArrowLeftIcon, CheckIcon, MailIcon } from '@lucide/vue'
 import { assertNever } from '#shared/connection'
 
 /**
@@ -17,8 +17,15 @@ import { assertNever } from '#shared/connection'
  *
  * Every step is the ordinary route with its ordinary checks; this page only
  * orders them. Progress after the connection exists lives in the URL
- * (`?connection=&step=`), so a reload resumes where it was rather than creating
- * a second connection.
+ * (`?connection=&step=`), so the wizard's own navigation never creates a second
+ * connection.
+ *
+ * **Starting is the last chance it gets.** Picking a connector clears the
+ * server's flag (the same call as Skip), so someone who walks away mid-way —
+ * closes the tab at the QR code — comes back to the ordinary screens, not to
+ * step 1 again (where a plan at its connection limit could not even pick).
+ * The run in progress carries on through `welcome:active`, which lasts for this
+ * page load only; middleware/auth.global.ts reads it.
  */
 type Step = 'pick' | 'details' | 'pair' | 'token' | 'updates'
 
@@ -57,7 +64,28 @@ function pairs(k: InstanceKind): boolean {
   }
 }
 
-const offersUpdates = computed(() => onboarding.value?.updates === true)
+// Read once: the flag is cleared as soon as a connector is picked, and the
+// session refresh that follows must not take the last step away mid-run.
+const offersUpdates = ref(onboarding.value?.updates === true)
+
+/** Live for this page load once setup has started; see the header comment. */
+const active = useState<boolean>('welcome:active', () => false)
+const { run: runStart } = useApiAction()
+
+/** Clear the flag the first time a connector is picked. Failure only means a later visit lands here again. */
+async function start() {
+  if (active.value) return
+  active.value = true
+  await runStart(
+    async () => {
+      await $fetch('/api/onboarding/finish', { method: 'POST' })
+      await refreshSession()
+      return true
+    },
+    { failure: 'Could not save setup progress' },
+  )
+}
+watch(kind, (picked) => { if (picked) void start() })
 
 const step = computed<Step>(() => {
   const k = connectionKind.value
@@ -80,6 +108,16 @@ const steps = computed(() => {
   ]
 })
 const currentIndex = computed(() => steps.value.findIndex(s => s.id === step.value))
+
+/**
+ * The step Back returns to, if any. Only steps after the connection exists:
+ * back to the form would create a second connection, so the first of them
+ * (scan, or token for a database or mailbox) has none.
+ */
+const previousStep = computed<Step | undefined>(() => {
+  const before = steps.value[currentIndex.value - 1]?.id
+  return before === 'pair' || before === 'token' ? before : undefined
+})
 
 function goTo(next: Step) {
   return navigateTo({ query: { connection: connectionId.value, step: next } })
@@ -252,6 +290,10 @@ async function finish() {
           </CardDescription>
         </CardHeader>
         <CardContent class="flex flex-wrap gap-3">
+          <Button v-if="previousStep" variant="outline" :disabled="finishing" @click="goTo(previousStep)">
+            <ArrowLeftIcon />
+            Back
+          </Button>
           <Button v-if="!tokenCreated" @click="tokens?.openCreate()">
             Create token
           </Button>
@@ -311,6 +353,10 @@ async function finish() {
               </p>
             </div>
             <div class="flex flex-wrap gap-3">
+              <Button v-if="previousStep" variant="outline" :disabled="subscribing || finishing" @click="goTo(previousStep)">
+                <ArrowLeftIcon />
+                Back
+              </Button>
               <Button :disabled="subscribing || !email.trim()" @click="subscribe">
                 {{ subscribing ? 'Signing up…' : 'Sign me up' }}
               </Button>

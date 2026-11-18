@@ -234,7 +234,9 @@ advisories only, no marketing. Nothing leaves your install unless the admin
 submits an address there; it is then posted with the install's version to
 `https://billing.getautomata.app/self-host/updates`. Set
 `NUXT_SELF_HOST_UPDATES_URL=off` to hide the offer. Invited members and
-accounts that existed before this release never see the setup.
+accounts that existed before this release never see the setup, and it is offered
+only until a connector is picked: someone who leaves part-way comes back to the
+ordinary screens.
 
 **`ALLOW_PRIVATE_TARGETS=true` with `SIGNUP=open` is the risky
 combination**, with Compose and the single container alike. Any stranger who

@@ -9,7 +9,8 @@ import type { Actor } from './org'
  * **Only the first admin of a new organization sees it.** `createOrganizationFor`
  * — the one path that makes an organization, run by signup and by signup's
  * verification — writes the user's id to `app.organizations.onboarding_for`;
- * finishing or skipping clears it. Existing organizations have none, invited
+ * picking a connector clears it (as do finishing and skipping), so setup is
+ * offered until it is started, never again after it is abandoned. Existing organizations have none, invited
  * members never match it, and accepting an invitation moves a user to an
  * organization that does not name them. Presentation only: every step uses the
  * ordinary routes and their checks.

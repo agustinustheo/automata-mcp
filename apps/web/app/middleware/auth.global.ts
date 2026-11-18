@@ -87,8 +87,13 @@ export default defineNuxtRouteMiddleware(async (to) => {
   if (onboarding.value && (to.path === '/instances' || to.path === '/instances/new')) {
     return navigateTo('/welcome')
   }
-  if (!onboarding.value && to.path === WELCOME_ROUTE) {
-    return navigateTo('/instances')
+  // Picking a connector clears the flag, so a run in progress is let through by
+  // `welcome:active` (this page load only). Anyone else — back after walking
+  // away mid-way — gets the ordinary screen: the connection's own page, where
+  // pairing and tokens live, or the list.
+  if (!onboarding.value && to.path === WELCOME_ROUTE && !useState<boolean>('welcome:active', () => false).value) {
+    const connection = typeof to.query.connection === 'string' ? to.query.connection : undefined
+    return navigateTo(connection ? `/instances/${encodeURIComponent(connection)}` : '/instances')
   }
 
   // An organization that lets only admins add connections makes the create flow
