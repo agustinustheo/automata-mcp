@@ -8,6 +8,7 @@ import { createCloudServer } from './http.ts'
 import { describeError } from './http-error.ts'
 import { consumeBillingEvents, consumeCrmEvents } from './outbox.ts'
 import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } from './plans.ts'
+import { SelfHostUpdates } from './self-host-updates.ts'
 
 /**
  * The hosted offering's service: everything the hosted deployment does that a
@@ -23,6 +24,7 @@ const OUTBOX_INTERVAL_MS = 15_000
 /** How often to ask whether today's activity-date pass is due; a run happens once per UTC day. */
 const DAILY_CHECK_INTERVAL_MS = 10 * 60_000
 const RECONCILE_INTERVAL_MS = 60 * 60 * 1000
+const SELF_HOST_SYNC_INTERVAL_MS = 10 * 60_000
 
 // Defence in depth: every request path catches its own rejections; one that
 // slips through is logged and the process keeps serving. Exiting would stop
@@ -58,7 +60,8 @@ const billing = new Billing(sql, config.stripe, config.appUrl)
 const crm = new Crm(sql, config.brevo)
 const state = { appReady: false, stopped: false }
 const regions = new ConsentRegions(config.ipLookupUrl)
-const server = createCloudServer(billing, crm, regions, config, state)
+const selfHost = new SelfHostUpdates(sql, crm, config.brevo?.selfHostList)
+const server = createCloudServer(billing, crm, regions, selfHost, config, state)
 
 // :: accepts IPv6 and IPv4 (legacy Railway private networking is IPv6-only).
 // A host with IPv6 disabled refuses :: outright, so fall back to IPv4 there.
@@ -83,7 +86,24 @@ if (!crm.configured) {
   }
 }
 
+if (selfHost.status === 'stored-only') {
+  console.info('[cloud] BREVO_SELF_HOST_LIST is not set — self-hoster update signups are stored and added to the list once it is.')
+}
+
 const timers: NodeJS.Timeout[] = []
+
+// Self-hoster update signups that did not reach Brevo when they arrived. Needs
+// only the cloud schema, so it does not wait for the web app.
+{
+  let running = false
+  timers.push(setInterval(() => {
+    if (running) return
+    running = true
+    selfHost.syncPending()
+      .catch(error => console.error(`[self-host] pass failed: ${describeError(error)}`))
+      .finally(() => { running = false })
+  }, SELF_HOST_SYNC_INTERVAL_MS))
+}
 
 /**
  * Once the web app's schema is there: publish Free's limits for new

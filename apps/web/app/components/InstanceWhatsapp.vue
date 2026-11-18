@@ -17,7 +17,15 @@ const props = withDefaults(defineProps<{
    * only — every control it hides is independently refused with a 403.
    */
   canManage?: boolean
-}>(), { canManage: false })
+  /**
+   * First-run setup (pages/welcome.vue): only the pairing and import screens,
+   * no header, dashboard, tokens or controls — setup shows those steps itself.
+   * Emits `paired` once the phone is linked.
+   */
+  setup?: boolean
+}>(), { canManage: false, setup: false })
+
+const emit = defineEmits<{ paired: [] }>()
 
 interface StatusResponse {
   instance: PublicInstanceRow
@@ -344,6 +352,12 @@ watch(mode, (next, previous) => {
 
 onMounted(() => applyMode(mode.value))
 
+// Setup moves on once the phone is linked; the history import carries on
+// server-side whether or not this screen stays open.
+watch(mode, (next) => {
+  if (next === 'importing' || next === 'connected') emit('paired')
+}, { immediate: true })
+
 function restartPairing() {
   pairingTimedOut.value = false
   pairingStartedAt.value = Date.now()
@@ -415,6 +429,7 @@ const importHistory = () => backToPairing(
 <template>
   <div class="space-y-8">
     <InstanceHeader
+      v-if="!setup"
       :id="id"
       :label="data?.instance.label"
       :can-manage="canManage"
@@ -458,7 +473,7 @@ const importHistory = () => backToPairing(
           {{ importProgress }}
         </p>
         <Button
-          v-if="mode === 'importing'"
+          v-if="mode === 'importing' && !setup"
           variant="ghost"
           size="sm"
           class="mt-2"
@@ -541,6 +556,18 @@ const importHistory = () => backToPairing(
             Show a new code
           </Button>
         </div>
+      </CardContent>
+    </Card>
+
+    <!-- Setup: linked, and nothing else to show here. -->
+    <Card v-else-if="setup">
+      <CardContent class="py-10 text-center">
+        <p class="font-medium">
+          {{ mode === 'connected' ? 'WhatsApp connected' : display.label }}
+        </p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          {{ mode === 'connected' ? (data?.profileName || data?.number || 'Your phone is linked.') : display.hint }}
+        </p>
       </CardContent>
     </Card>
 
@@ -680,6 +707,7 @@ const importHistory = () => backToPairing(
       </p>
     </template>
 
+    <template v-if="!setup">
     <Separator />
 
     <DbUrlNotice v-if="needsDbUrl" :id="id" kind="whatsapp" @saved="refresh()" />
@@ -742,6 +770,7 @@ const importHistory = () => backToPairing(
           <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="whatsapp" />
         </div>
       </section>
+    </template>
     </template>
   </div>
 </template>

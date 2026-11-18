@@ -225,6 +225,27 @@ Promo campaigns for Free users only: filter on `PLAN` equals `Free`. Winback: fi
 
 **How a date is cleared:** Brevo does not document how to empty an attribute. Tested against a real contact (2026-11-12): an update sending `""` empties a date attribute; `null` is answered 204 and **ignored**. The service sends `""` (`CLEARED` in `crm.ts`). If Brevo's behaviour ever changes, a cleared date would silently stay — re-test by setting `LAST_MCP_USE` on a contact, sending `""`, and reading it back.
 
+### Self-hoster update mail
+
+A self-hosted install's first-run setup (`/welcome`, last step) offers its admin
+update mail: breaking changes and security advisories, explicitly no marketing.
+The install's server posts `{ email, version }` to the cloud service's public
+`POST /self-host/updates` (default target `https://billing.getautomata.app/self-host/updates`,
+`NUXT_SELF_HOST_UPDATES_URL` on the install). The hosted offering never offers it.
+
+- Stored in `cloud.self_host_subscribers` (lower-cased address, version,
+  `synced_at`, `refused_at`). Storing is the promise; the Brevo list is a copy.
+- Added to `BREVO_SELF_HOST_LIST` (optional, needs `BREVO_API_KEY`, must differ
+  from the other two lists) by a create-or-update with only the list id — no
+  attributes, so a hosted user's contact at the same address keeps everything.
+  A failed add is retried every ten minutes; an address Brevo refuses for good
+  gets `refused_at`. `/health` reports `selfHostUpdates: stored-only | syncing`.
+- Public, so throttled in memory: 5 per caller address and 300 in total per
+  hour. The answer is the same whether the address was new. Addresses and IPs
+  are never logged.
+- No double opt-in: anyone can submit any address. Mail sent to this list must
+  stay to what was promised, and carry Brevo's unsubscribe link.
+
 ### Setting it up
 
 1. In Brevo, create an API key (**SMTP & API → API keys**) and two contact lists. Note each list's numeric id.

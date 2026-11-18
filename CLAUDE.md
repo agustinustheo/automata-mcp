@@ -69,7 +69,7 @@ Nuxt overrides `runtimeConfig` only from `NUXT_`-prefixed vars, so some values d
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
   app/pages/                 index, login, signup, verify-email, forgot-password,
-                             reset-password, no-organization, team,
+                             reset-password, no-organization, team, welcome,
                              profile, billing, invite/[code], instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue, bare names)
   app/composables/           useSession (user + org + role), useOrg, useConnectionState,
@@ -177,6 +177,12 @@ Rules easy to undo:
 - **Telegram per-chat count: 20k on every plan, Pro loads more per chat.** Bridge's `TELEGRAM_BACKFILL_MAX_PER_CHAT` (default 20000) stops each chat (`count`), long before 90 days in a busy group. **Load more** (Chats list, managers) → `POST /api/instances/:id/telegram/backfill` → bridge `POST /sessions/:id/backfill`: raises `chats.backfill_limit` to held + another max, only from `count` (conditional UPDATE), cursor kept, same pace; **day limit never lifted**. 402 where `historyLimited()` (same rule as above, so BYO/self-hosted always allowed). Older bridge = generic 404 without `code` → 503 + log, never "Not found". Plan copy quotes `TELEGRAM_HISTORY_MESSAGES_PER_CHAT` / `TELEGRAM_FULL_HISTORY_DAYS` (`shared/history.ts`) = wording only; changing the bridge setting on hosted = change them too.
 - **Limits in DB outlive hosted mode.** Unsetting `NUXT_CLOUD_URL` stops writes, doesn't clear `max_*`; clear by hand.
 - Plan limit refusal = **402** `data.code = 'plan_limit'`; UI (`toastApiError` in `usePlan.ts`) offers Billing link to admins only. UI copy outside Billing page words limits by number, not plan name.
+
+## First-run setup
+
+`/welcome` (`pages/welcome.vue`, `server/utils/onboarding.ts`): pick connector → name + credentials → scan (WhatsApp/Telegram) → first token → (self-hosted) update mail. **Only the first admin of a new org:** `createOrganizationFor` writes `app.organizations.onboarding_for = user`, finish/skip (`POST /api/onboarding/finish`) clears it conditionally; existing orgs NULL (migration `0029`), invited members never match, accepting an invite moves the user to an org that doesn't name them. Surfaced as `membership.onboarding` on `/api/auth/me`; middleware sends `/instances` and `/instances/new` there, nothing else. Pure presentation — each step = ordinary component + route: `ConnectionCreateForm` (shared with `/instances/new`, emits `created`), `InstanceWhatsapp`/`InstanceTelegram` with `setup` (pairing screens only, emit `paired`), `McpTokens` (`openCreate` exposed **before** its first `await` — after it, the parent's ref resolves without it; emits `created`). Progress after create lives in the URL (`?connection=&step=`) so reload never makes a second connection.
+
+**Update mail = self-hosted only, opt-in by submit.** `POST /api/onboarding/updates` (admin) posts `{ email, version }` to `NUXT_SELF_HOST_UPDATES_URL` (default `https://billing.getautomata.app/self-host/updates`, `off` hides it; 404 in hosted mode). Cloud side `self-host-updates.ts`: public route, throttled per caller + total, same answer new or not, `cloud.self_host_subscribers` then Brevo `BREVO_SELF_HOST_LIST` via `crm.addToList` (list id only, no attributes), retried every 10 min. Copy promises breaking changes + security advisories only, no marketing — mail to that list must keep it.
 
 ## Email verification
 
