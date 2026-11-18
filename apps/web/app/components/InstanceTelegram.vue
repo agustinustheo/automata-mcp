@@ -20,7 +20,14 @@ const props = withDefaults(defineProps<{
    * independently refused with a 403.
    */
   canManage?: boolean
-}>(), { canManage: false })
+  /**
+   * First-run setup (pages/welcome.vue): only the link screens, no header,
+   * dashboard, tokens or controls. Emits `paired` once the account is linked.
+   */
+  setup?: boolean
+}>(), { canManage: false, setup: false })
+
+const emit = defineEmits<{ paired: [] }>()
 
 interface StatusResponse {
   instance: PublicInstanceRow
@@ -209,6 +216,10 @@ watch(mode, (next, previous) => {
 
 onMounted(() => applyMode(mode.value))
 
+watch(mode, (next) => {
+  if (next === 'connected') emit('paired')
+}, { immediate: true })
+
 // ── actions ────────────────────────────────────────────────────────────────
 async function unlink() {
   await run(
@@ -233,6 +244,7 @@ const hosted = useHosted()
 <template>
   <div class="space-y-8">
     <InstanceHeader
+      v-if="!setup"
       :id="id"
       :label="data?.instance.label"
       :can-manage="canManage"
@@ -353,6 +365,18 @@ const hosted = useHosted()
       </template>
     </Card>
 
+    <!-- Setup: linked (or an error worth reading), nothing else here. -->
+    <Card v-else-if="setup">
+      <CardContent class="py-10 text-center">
+        <p class="font-medium">
+          {{ mode === 'connected' ? 'Telegram account linked' : display.label }}
+        </p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          {{ mode === 'connected' ? (profileDetail !== '—' ? profileDetail : 'Chats are syncing now.') : display.hint }}
+        </p>
+      </CardContent>
+    </Card>
+
     <!-- ── linked, or was ──────────────────────────────────────────────── -->
     <template v-else>
       <SessionLostNotice
@@ -414,6 +438,7 @@ const hosted = useHosted()
       </p>
     </template>
 
+    <template v-if="!setup">
     <Separator />
 
     <DbUrlNotice v-if="needsDbUrl" :id="id" kind="telegram" @saved="refresh()" />
@@ -454,6 +479,7 @@ const hosted = useHosted()
           <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="telegram" />
         </div>
       </section>
+    </template>
     </template>
   </div>
 </template>

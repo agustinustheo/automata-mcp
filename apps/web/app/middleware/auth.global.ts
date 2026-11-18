@@ -28,6 +28,9 @@ const VERIFY_ROUTE = '/verify-email'
  */
 const RESET_ROUTES = new Set(['/forgot-password', '/reset-password'])
 
+/** First-run setup; see pages/welcome.vue. */
+const WELCOME_ROUTE = '/welcome'
+
 /**
  * Session gate. Authentication, plus the two routing decisions that depend on
  * the organization.
@@ -52,7 +55,7 @@ const RESET_ROUTES = new Set(['/forgot-password', '/reset-password'])
  * browser gets you a 403, not an action.
  */
 export default defineNuxtRouteMiddleware(async (to) => {
-  const { user, hasOrg, isAdmin, canCreateConnections, membership, ensureLoaded } = useSession()
+  const { user, hasOrg, isAdmin, canCreateConnections, membership, onboarding, ensureLoaded } = useSession()
   await ensureLoaded()
 
   if (isInviteRoute(to.path) || to.path === VERIFY_ROUTE || RESET_ROUTES.has(to.path)) return
@@ -75,6 +78,22 @@ export default defineNuxtRouteMiddleware(async (to) => {
 
   if (hasOrg.value && to.path === ORGLESS_ROUTE) {
     return navigateTo('/instances')
+  }
+
+  // First-run setup: the admin whose signup made the organization lands in it
+  // instead of the bare create page, until they finish or skip it. Only the
+  // landing routes redirect — Billing (hosted checkout returns there), Profile
+  // and the rest stay reachable mid-setup.
+  if (onboarding.value && (to.path === '/instances' || to.path === '/instances/new')) {
+    return navigateTo('/welcome')
+  }
+  // Picking a connector clears the flag, so a run in progress is let through by
+  // `welcome:active` (this page load only). Anyone else — back after walking
+  // away mid-way — gets the ordinary screen: the connection's own page, where
+  // pairing and tokens live, or the list.
+  if (!onboarding.value && to.path === WELCOME_ROUTE && !useState<boolean>('welcome:active', () => false).value) {
+    const connection = typeof to.query.connection === 'string' ? to.query.connection : undefined
+    return navigateTo(connection ? `/instances/${encodeURIComponent(connection)}` : '/instances')
   }
 
   // An organization that lets only admins add connections makes the create flow

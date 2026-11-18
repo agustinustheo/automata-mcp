@@ -11,6 +11,12 @@ export interface SessionMembership {
   /** Admins always; members while the organization allows it. Server-decided. */
   canCreateConnections?: boolean
   /**
+   * First-run setup, present only while it is this admin's to do (the admin
+   * whose signup created the organization). `updates`: the last step offers
+   * update mail (self-hosted only). See pages/welcome.vue.
+   */
+  onboarding?: { updates: boolean }
+  /**
    * `plan` (a display name such as "Free" or "Pro (trial)"), `limited`,
    * `overLimit`, `recentHistoryOnly` and `telemetry` are present only on the
    * hosted deployment; see usePlan() and plugins/posthog.client.ts.
@@ -77,6 +83,7 @@ export function useSession() {
     // UI only — POST /api/instances refuses independently (`mayCreateConnections`).
     canCreateConnections: computed(() => membership.value?.canCreateConnections === true),
     hasOrg: computed(() => Boolean(membership.value)),
+    onboarding: computed(() => membership.value?.onboarding ?? null),
     loaded,
     refresh,
     ensureLoaded,

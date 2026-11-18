@@ -194,6 +194,28 @@ export class Crm {
     return true
   }
 
+  /**
+   * Put one address on a list: a self-hoster asking for update mail
+   * (self-host-updates.ts). Created if Brevo has no such contact, otherwise
+   * added to the list with nothing else changed — no attributes are sent, so a
+   * hosted user's contact that shares the address keeps everything it has.
+   * Adding to a list does not lift a Brevo unsubscribe (blacklist), so one is
+   * never undone here either. Throws `BrevoError`.
+   */
+  async addToList(email: string, listId: number): Promise<void> {
+    await this.call('POST', '/contacts', { email, listIds: [listId], updateEnabled: true })
+  }
+
+  /**
+   * Ask an address to confirm joining a list: Brevo mails `templateId` (which
+   * carries the `{{ doubleoptin }}` link), adds the contact to `listId` only on
+   * the click, then sends the browser to `redirectionUrl`. Sends no attributes.
+   * Every call is a real email, so callers bound how often an address gets one.
+   */
+  async requestDoubleOptIn(email: string, listId: number, templateId: number, redirectionUrl: string): Promise<void> {
+    await this.call('POST', '/contacts/doubleOptinConfirmation', { email, includeListIds: [listId], templateId, redirectionUrl })
+  }
+
   /** Current state of these users, keyed by id. A user with no row is absent. */
   async loadUsers(ids: string[]): Promise<Map<string, CrmUser>> {
     if (ids.length === 0) return new Map()
