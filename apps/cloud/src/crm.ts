@@ -206,6 +206,16 @@ export class Crm {
     await this.call('POST', '/contacts', { email, listIds: [listId], updateEnabled: true })
   }
 
+  /**
+   * Ask an address to confirm joining a list: Brevo mails `templateId` (which
+   * carries the `{{ doubleoptin }}` link), adds the contact to `listId` only on
+   * the click, then sends the browser to `redirectionUrl`. Sends no attributes.
+   * Every call is a real email, so callers bound how often an address gets one.
+   */
+  async requestDoubleOptIn(email: string, listId: number, templateId: number, redirectionUrl: string): Promise<void> {
+    await this.call('POST', '/contacts/doubleOptinConfirmation', { email, includeListIds: [listId], templateId, redirectionUrl })
+  }
+
   /** Current state of these users, keyed by id. A user with no row is absent. */
   async loadUsers(ids: string[]): Promise<Map<string, CrmUser>> {
     if (ids.length === 0) return new Map()

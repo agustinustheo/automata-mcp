@@ -60,7 +60,7 @@ const billing = new Billing(sql, config.stripe, config.appUrl)
 const crm = new Crm(sql, config.brevo)
 const state = { appReady: false, stopped: false }
 const regions = new ConsentRegions(config.ipLookupUrl)
-const selfHost = new SelfHostUpdates(sql, crm, config.brevo?.selfHostList)
+const selfHost = new SelfHostUpdates(sql, crm, config.brevo?.selfHostList, config.brevo?.selfHostDoi)
 const server = createCloudServer(billing, crm, regions, selfHost, config, state)
 
 // :: accepts IPv6 and IPv4 (legacy Railway private networking is IPv6-only).
@@ -88,6 +88,9 @@ if (!crm.configured) {
 
 if (selfHost.status === 'stored-only') {
   console.info('[cloud] BREVO_SELF_HOST_LIST is not set — self-hoster update signups are stored and added to the list once it is.')
+}
+else if (selfHost.status === 'confirming') {
+  console.info('[cloud] self-hoster update signups confirm by email (BREVO_SELF_HOST_DOI_TEMPLATE) before joining the list.')
 }
 
 const timers: NodeJS.Timeout[] = []

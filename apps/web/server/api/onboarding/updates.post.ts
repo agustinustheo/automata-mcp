@@ -14,6 +14,6 @@ export default defineEventHandler(async (event) => {
   const actor = await requireOrgAdmin(event)
   if (!selfHostUpdatesUrl()) throw createError({ statusCode: 404, statusMessage: 'Not found' })
   const { email } = await parseBody(event, body)
-  await subscribeToUpdates(actor, email)
-  return { ok: true }
+  const { confirm } = await subscribeToUpdates(actor, email)
+  return { ok: true, confirm }
 })

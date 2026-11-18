@@ -142,14 +142,18 @@ function afterToken() {
 // ── step 5 ────────────────────────────────────────────────────────────────
 const email = ref(user.value?.email ?? '')
 const subscribed = ref(false)
+/** Our list asks each address to confirm by email (double opt-in). */
+const mustConfirm = ref(false)
 const { busy: subscribing, run: runSubscribe } = useApiAction()
 
 async function subscribe() {
   const ok = await runSubscribe(
-    () => $fetch<{ ok: boolean }>('/api/onboarding/updates', { method: 'POST', body: { email: email.value.trim() } }),
+    () => $fetch<{ ok: boolean, confirm?: boolean }>('/api/onboarding/updates', { method: 'POST', body: { email: email.value.trim() } }),
     { failure: 'Could not sign you up' },
   )
-  if (ok) subscribed.value = true
+  if (!ok) return
+  mustConfirm.value = ok.confirm === true
+  subscribed.value = true
 }
 
 // ── finishing ─────────────────────────────────────────────────────────────
@@ -367,7 +371,14 @@ async function finish() {
           </template>
 
           <template v-else>
-            <p class="flex items-center gap-2 text-sm">
+            <p v-if="mustConfirm" class="flex items-start gap-2 text-sm">
+              <MailIcon class="mt-0.5 size-4 shrink-0" />
+              <span>
+                <span class="font-medium">Check your inbox to confirm.</span>
+                We sent a link to {{ email.trim() }}. Nothing is sent to it until you click it.
+              </span>
+            </p>
+            <p v-else class="flex items-center gap-2 text-sm">
               <CheckIcon class="size-4 text-primary" />
               You're on the list.
             </p>

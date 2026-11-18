@@ -127,6 +127,11 @@ export async function ensureCloudSchema(sql: Sql): Promise<void> {
       refused_at timestamptz
     )
   `
+  // Double opt-in: when the last confirmation email was asked of Brevo. Claimed
+  // before the call, so an address gets at most one a day however often it is
+  // submitted. `synced_at` then means "Brevo accepted the request", not "on the
+  // list": only the click puts it there.
+  await sql`ALTER TABLE cloud.self_host_subscribers ADD COLUMN IF NOT EXISTS doi_sent_at timestamptz`
 }
 
 /**

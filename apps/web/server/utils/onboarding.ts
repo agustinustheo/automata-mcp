@@ -62,7 +62,11 @@ export function selfHostUpdatesUrl(): string | undefined {
  * which is written for the person in the browser; anything else is logged
  * (without the address) and answered 503.
  */
-export async function subscribeToUpdates(actor: Actor, email: string): Promise<void> {
+/**
+ * Answers whether the address must confirm by email first (the cloud's double
+ * opt-in), so the page can say so; an older cloud that doesn't say = no.
+ */
+export async function subscribeToUpdates(actor: Actor, email: string): Promise<{ confirm: boolean }> {
   const url = selfHostUpdatesUrl()
   if (!url) throw createError({ statusCode: 404, statusMessage: 'Not found' })
 
@@ -77,12 +81,13 @@ export async function subscribeToUpdates(actor: Actor, email: string): Promise<v
   }
 
   try {
-    await $fetch(url, {
+    const answer = await $fetch<{ confirm?: unknown }>(url, {
       method: 'POST',
       body: { email, version },
       signal: AbortSignal.timeout(UPDATES_TIMEOUT_MS),
       retry: 0,
     })
+    return { confirm: answer?.confirm === true }
   }
   catch (error: any) {
     const status = Number(error?.response?.status ?? 0)

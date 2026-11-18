@@ -6,6 +6,7 @@ import type { CloudConfig } from './config.ts'
 import type { ConsentRegions } from './consent-region.ts'
 import type { Crm } from './crm.ts'
 import type { SelfHostUpdates } from './self-host-updates.ts'
+import { CONFIRMED_PAGE, CONFIRMED_PAGE_CSP } from './self-host-confirmed.ts'
 import { HttpError, describeError } from './http-error.ts'
 
 /**
@@ -13,7 +14,9 @@ import { HttpError, describeError } from './http-error.ts'
  *
  *   public   GET /health, POST /webhooks/stripe (Stripe-signed),
  *            POST /self-host/updates (a self-hosted install's admin asking
- *            for update mail; throttled — self-host-updates.ts)
+ *            for update mail; throttled — self-host-updates.ts),
+ *            GET /self-host/confirmed (static page Brevo's double opt-in
+ *            link lands on — self-host-confirmed.ts)
  *   admin    everything under /orgs/:id — called by the web app only, with
  *            CLOUD_ADMIN_KEY as a bearer. The web app has already decided the
  *            caller is an admin of that organization; this service trusts that
@@ -34,6 +37,8 @@ type Access = 'public' | 'admin'
 interface Reply {
   status: number
   body?: unknown
+  /** A static page instead of JSON, served under this CSP. */
+  html?: { page: string, csp: string }
 }
 
 interface Route {
@@ -124,9 +129,13 @@ export function createCloudServer(billing: Billing, crm: Crm, regions: ConsentRe
       // throttled and answered the same whether or not the address was new.
       label: 'POST /self-host/updates', method: 'POST', pattern: /^\/self-host\/updates$/, access: 'public',
       handle: async ({ body, req }) => {
-        await selfHost.subscribe(body, req)
-        return { status: 200, body: { ok: true } }
+        const { confirm } = await selfHost.subscribe(body, req)
+        return { status: 200, body: { ok: true, confirm } }
       },
+    },
+    {
+      label: 'GET /self-host/confirmed', method: 'GET', pattern: /^\/self-host\/confirmed$/, access: 'public',
+      handle: async () => ({ status: 200, html: { page: CONFIRMED_PAGE, csp: CONFIRMED_PAGE_CSP } }),
     },
     {
       // Never fails for want of an answer: `unknown` is an answer, and the web
@@ -252,6 +261,16 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
 
 function send(res: ServerResponse, reply: Reply): void {
   if (res.headersSent) return
+  if (reply.html) {
+    res.writeHead(reply.status, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-security-policy': reply.html.csp,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'cache-control': 'public, max-age=300',
+    }).end(reply.html.page)
+    return
+  }
   if (reply.body === undefined) {
     res.writeHead(reply.status, { 'cache-control': 'no-store' }).end()
     return
