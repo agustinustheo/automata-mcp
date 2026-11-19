@@ -1,6 +1,6 @@
 import type { AppMcpToken, Db } from './app-db'
 import type { McpScope } from './mcp-scope'
-import type { ScopeInput } from './scope-schema'
+import type { ExpiryPreset, ScopeInput } from './scope-schema'
 import type { PublicTokenClient } from './mcp-clients'
 
 /**
@@ -121,10 +121,6 @@ export async function listTokens(
     clients: clients ? clients.get(row.id) ?? [] : undefined,
   }))
 }
-
-/** Expiry presets offered by the UI. `never` leaves `expires_at` NULL. */
-export const EXPIRY_PRESETS = ['30d', '90d', '1y', 'never'] as const
-export type ExpiryPreset = typeof EXPIRY_PRESETS[number]
 
 export function expiryFromPreset(preset: ExpiryPreset): string | null {
   if (preset === 'never') return null

@@ -1,6 +1,5 @@
 import { z } from 'zod'
 import type { McpScope } from './mcp-scope'
-import { EXPIRY_PRESETS } from './tokens'
 
 /**
  * One schema for both minting and editing, so the two can never disagree about
@@ -41,6 +40,16 @@ export type ScopeInput = z.infer<typeof scopeSchema>
  * `null` turns it off; absent leaves it as it is, so a PATCH from a client that
  * does not know about it cannot clear it by accident.
  */
+/**
+ * Expiry presets offered by the UI. `never` leaves `expires_at` NULL.
+ *
+ * Defined here, not in tokens.ts, on purpose: Nitro bundles server utils into
+ * one chunk, and a runtime import from tokens.ts read this before tokens.ts
+ * had initialised it (TDZ crash at boot). Only type imports cross that way.
+ */
+export const EXPIRY_PRESETS = ['30d', '90d', '1y', 'never'] as const
+export type ExpiryPreset = typeof EXPIRY_PRESETS[number]
+
 /** A token's lifetime, as minted, requested or approved. */
 export const expirySchema = z.enum(EXPIRY_PRESETS).default('90d')
 

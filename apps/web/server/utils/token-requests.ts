@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto'
 import type { Actor } from './org'
 import type { AppInstance, AppMcpToken } from './app-db'
-import type { ExpiryPreset, PublicToken } from './tokens'
+import type { PublicToken } from './tokens'
+import type { ExpiryPreset } from './scope-schema'
 import type { McpScope } from './mcp-scope'
 import { tokenRequestEmail } from '../emails/account'
 
