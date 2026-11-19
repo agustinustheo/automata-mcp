@@ -123,7 +123,8 @@ export async function listTokens(
 }
 
 /** Expiry presets offered by the UI. `never` leaves `expires_at` NULL. */
-export type ExpiryPreset = '30d' | '90d' | '1y' | 'never'
+export const EXPIRY_PRESETS = ['30d', '90d', '1y', 'never'] as const
+export type ExpiryPreset = typeof EXPIRY_PRESETS[number]
 
 export function expiryFromPreset(preset: ExpiryPreset): string | null {
   if (preset === 'never') return null

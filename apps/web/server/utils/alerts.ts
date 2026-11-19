@@ -808,7 +808,7 @@ async function recipientsFor(instance: AppInstance): Promise<AlertRecipient[]> {
     .map(member => ({
       email: member.email,
       // Already filtered to those who reach it, so only the management half is asked.
-      canManage: managesInstance({ role: member.role, userId: member.userId }, instance, true),
+      canManage: managesInstance(member, instance, true),
     }))
 }
 

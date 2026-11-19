@@ -112,8 +112,7 @@ export async function requestApprovers(instance: AppInstance, orgId: string): Pr
   const members = await listOrgMembers(orgId)
   const creator = instance.created_by ? members.find(m => m.userId === instance.created_by) : undefined
   if (creator) {
-    const reaches = creator.role === 'admin' || await hasAssignment(creator.userId, instance.id)
-    if (managesInstance({ role: creator.role, userId: creator.userId }, instance, reaches)) return [creator]
+    if (managesInstance(creator, instance, await memberReaches(creator, orgId, instance))) return [creator]
   }
   return members.filter(m => m.role === 'admin')
 }
@@ -165,8 +164,7 @@ export async function approveTokenRequest(
   }
 
   const holder = await requireOrgMember(actor.org.id, token.assigned_to)
-  const reaches = holder.role === 'admin' || await hasAssignment(holder.userId, instance.id)
-  if (!reaches) {
+  if (!await memberReaches(holder, actor.org.id, instance)) {
     throw createError({
       statusCode: 422,
       statusMessage: `${holder.email} no longer has access to this connection, so a token for them would not work. `

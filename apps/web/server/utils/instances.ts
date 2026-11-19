@@ -1601,7 +1601,7 @@ async function cachedLastInbound(instance: AppInstance): Promise<LastInbound | u
   if (!reading) {
     reading = readLastInbound(instance)
       .then((value) => {
-        lastInboundCache.set(instance.id, { at: Date.now(), value })
+        rememberBounded(lastInboundCache, instance.id, { at: Date.now(), value }, MAX_COUNTS_ENTRIES)
         return value
       })
       .finally(() => lastInboundInFlight.delete(instance.id))

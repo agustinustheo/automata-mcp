@@ -1025,11 +1025,8 @@ export class SessionManager {
     const read = this.readCounts(id, entry)
     if (!fresh && last) return last
 
-    let timer: NodeJS.Timeout | undefined
-    const deadline = new Promise<'slow'>((resolve) => {
-      timer = setTimeout(() => resolve('slow'), COUNTS_DEADLINE_MS)
-    })
-    const answer = await Promise.race([read, deadline]).finally(() => clearTimeout(timer))
+    // `readCounts` never rejects, so a rejection here is the deadline.
+    const answer = await withTimeout(read, COUNTS_DEADLINE_MS).catch(() => 'slow' as const)
     if (answer === 'slow') {
       this.logCounts(id, entry, `counts took longer than ${COUNTS_DEADLINE_MS} ms; answering ${entry.last ? 'with older ones' : 'without them'}`)
       return entry.last

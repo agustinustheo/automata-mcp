@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { McpScope } from './mcp-scope'
+import { EXPIRY_PRESETS } from './tokens'
 
 /**
  * One schema for both minting and editing, so the two can never disagree about
@@ -40,6 +41,9 @@ export type ScopeInput = z.infer<typeof scopeSchema>
  * `null` turns it off; absent leaves it as it is, so a PATCH from a client that
  * does not know about it cannot clear it by accident.
  */
+/** A token's lifetime, as minted, requested or approved. */
+export const expirySchema = z.enum(EXPIRY_PRESETS).default('90d')
+
 export const disclaimerSchema = z.object({
   send_disclaimer: z.string().trim().min(1).max(200).nullable().optional(),
 })

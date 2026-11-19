@@ -512,8 +512,11 @@ export interface LastInbound {
  */
 export async function readLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
   const { query } = await evolutionDbFor(instance)
-  const instanceId = await resolveEvolutionInstanceId(instance)
-  if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
+  const [instanceId, indexed] = await Promise.all([
+    resolveEvolutionInstanceId(instance),
+    messageIndexPresent(instance, query, INSTANCE_TS_INDEX),
+  ])
+  if (!indexed) return undefined
 
   const now = Date.now()
   const since = Math.floor((now - LAST_INBOUND_WINDOW_MS) / 1000)
@@ -1100,9 +1103,11 @@ interface MessageIndexSpec {
   label: string
   fallback: string
   missing: string
-  cache: ReturnType<typeof staleWhileFailing<boolean>>
-  reported: Set<string>
 }
+
+/** Keyed `<message pool>|<spec.shape>`: one entry per database per index. */
+const indexPresence = staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false })
+const indexMissingReported = new Set<string>()
 
 /**
  * Whether this message database has an index of `spec`'s shape: valid, ready,
@@ -1118,9 +1123,9 @@ async function messageIndexPresent(
   query: SharedPool['query'],
   spec: MessageIndexSpec,
 ): Promise<boolean> {
-  const key = messagePoolKey(instance)
+  const key = `${messagePoolKey(instance)}|${spec.shape}`
 
-  return await spec.cache(key, async () => {
+  return await indexPresence(key, async () => {
     let present: boolean
     try {
       const [row] = await query(sql => sql<Array<{ present: boolean }>>`
@@ -1141,11 +1146,11 @@ async function messageIndexPresent(
       return undefined
     }
 
-    if (!present && !spec.reported.has(key)) {
-      spec.reported.add(key)
+    if (!present && !indexMissingReported.has(key)) {
+      indexMissingReported.add(key)
       console.warn(`${spec.label} ${spec.missing}`)
     }
-    if (present) spec.reported.delete(key)
+    if (present) indexMissingReported.delete(key)
     return present
   })
 }
@@ -1159,8 +1164,6 @@ const CHAT_TS_INDEX: MessageIndexSpec = {
   missing: '"Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
     + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
     + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 const INSTANCE_TS_INDEX: MessageIndexSpec = {
@@ -1172,8 +1175,6 @@ const INSTANCE_TS_INDEX: MessageIndexSpec = {
   missing: '"Message" has no index on ("instanceId", "messageTimestamp"), so the time an account '
     + 'last received a message is not shown. Create message_instance_ts_idx: see docs/whatsapp.md '
     + '"Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 /**
@@ -1273,8 +1274,6 @@ const LID_ALT_INDEX: MessageIndexSpec = {
   missing: '"Message" has no partial index WHERE key ? \'remoteJidAlt\', '
     + 'so reading LID links scans every message in an account\'s LID chats and large accounts time out. '
     + 'Create message_lid_alt_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 /**
