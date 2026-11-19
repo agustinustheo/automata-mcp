@@ -252,6 +252,12 @@ export interface AppOrganization {
    * `membersMayCreateConnections` reads as on — the column default.
    */
   members_create_connections?: boolean
+  /**
+   * The user the first-run setup is for (the admin whose signup created the
+   * organization), until they finish or skip it. Read with the membership in
+   * `loadActor`. See server/utils/onboarding.ts.
+   */
+  onboarding_for?: string
 }
 
 /**

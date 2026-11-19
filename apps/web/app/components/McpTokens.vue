@@ -22,6 +22,16 @@ const props = withDefaults(defineProps<{
   canManage?: boolean
 }>(), { canManage: false })
 
+/**
+ * `created`: a token was minted (its secret is on screen now). `revealClosed`:
+ * the reveal dialog was dismissed. First-run setup (pages/welcome.vue) moves
+ * on from these; it opens the create dialog through `openCreate`.
+ */
+const emit = defineEmits<{ created: [], revealClosed: [] }>()
+// Before the first `await` below: exposed after it, a parent's template ref
+// has already resolved without it. `openCreate` is a hoisted declaration.
+defineExpose({ openCreate })
+
 const { user, isAdmin } = useSession()
 
 /**
@@ -312,6 +322,7 @@ async function create() {
   createOpen.value = false
   newLabel.value = ''
   newScope.value = openScope()
+  emit('created')
   await refresh()
 }
 
@@ -817,6 +828,6 @@ function statusOf(token: TokenRow) {
       @update:open="value => { if (!value) clientsOf = null }"
     />
 
-    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null" />
+    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null; emit('revealClosed')" />
   </section>
 </template>

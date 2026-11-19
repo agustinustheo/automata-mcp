@@ -196,6 +196,12 @@ export default defineNuxtConfig({
     // and docs/billing.md.
     cloudUrl: '',
     cloudAdminKey: '',
+    // Self-hosted only: where onboarding's "email me about breaking changes and
+    // security advisories" signup is posted — our cloud service's public
+    // endpoint (apps/cloud/src/self-host-updates.ts). The admin's address
+    // leaves this install only when they submit it there. `off` hides the
+    // offer. Ignored on the hosted offering. See server/utils/onboarding.ts.
+    selfHostUpdatesUrl: 'https://billing.getautomata.app/self-host/updates',
     // Superseded by cloudUrl. Still read so a hosted deployment that upgrades
     // without setting the new variables keeps its plans on (fail closed).
     billing: '',

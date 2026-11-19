@@ -226,6 +226,18 @@ no Billing page, and no limit on connections, tokens or members. They exist only
 for the hosted offering, behind `NUXT_CLOUD_URL` — see [billing.md](billing.md) —
 and you never need to set it.
 
+**First-run setup.** Whoever signs up and creates a new organization is walked
+through it once: pick a connector, name it and add its credentials, scan the QR
+code (WhatsApp and Telegram), create the first connector token. The last step
+on a self-hosted install offers update mail — breaking changes and security
+advisories only, no marketing. Nothing leaves your install unless the admin
+submits an address there; it is then posted with the install's version to
+`https://billing.getautomata.app/self-host/updates`. Set
+`NUXT_SELF_HOST_UPDATES_URL=off` to hide the offer. Invited members and
+accounts that existed before this release never see the setup, and it is offered
+only until a connector is picked: someone who leaves part-way comes back to the
+ordinary screens.
+
 **`ALLOW_PRIVATE_TARGETS=true` with `SIGNUP=open` is the risky
 combination**, with Compose and the single container alike. Any stranger who
 signs up can then paste a database or Evolution address such as

@@ -15,7 +15,8 @@ export type Db = postgres.Sql | postgres.TransactionSql
  *           credentials.
  *   cloud   this service's own state — consumer cursors on the event outbox,
  *           CRM updates Brevo refused for good, the activity dates each
- *           contact last received, and daily job leases. Created here at boot.
+ *           contact last received, daily job leases, and the self-hosters who
+ *           asked for update mail. Created here at boot.
  */
 export const CLOUD_SCHEMA = 'cloud'
 
@@ -110,6 +111,27 @@ export async function ensureCloudSchema(sql: Sql): Promise<void> {
       lease_until timestamptz NOT NULL DEFAULT '-infinity'
     )
   `
+
+  // Self-hosters who asked their install for update mail (breaking changes,
+  // security advisories) — self-host-updates.ts. Keyed on the lower-cased
+  // address; `synced_at` NULL = not on the Brevo list yet, `refused_at` = Brevo
+  // refused it for good (an address it calls invalid). `version` = the
+  // install's version at signup, so an advisory can be aimed at who runs it.
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloud.self_host_subscribers (
+      email     text PRIMARY KEY,
+      version   text,
+      created   timestamptz NOT NULL DEFAULT now(),
+      updated   timestamptz NOT NULL DEFAULT now(),
+      synced_at timestamptz,
+      refused_at timestamptz
+    )
+  `
+  // Double opt-in: when the last confirmation email was asked of Brevo. Claimed
+  // before the call, so an address gets at most one a day however often it is
+  // submitted. `synced_at` then means "Brevo accepted the request", not "on the
+  // list": only the click puts it there.
+  await sql`ALTER TABLE cloud.self_host_subscribers ADD COLUMN IF NOT EXISTS doi_sent_at timestamptz`
 }
 
 /**

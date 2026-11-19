@@ -69,6 +69,9 @@ export default defineEventHandler(async (event) => {
           // organization's switch, decided once (`mayCreateConnections`). Read
           // with the membership, so no extra query.
           canCreateConnections: mayCreateConnections(actor),
+          // First-run setup, while it is this admin's to do — absent
+          // otherwise. See server/utils/onboarding.ts.
+          onboarding: onboardingFor(actor),
           org: { id: actor.org.id, name: actor.org.name, ...plan },
         }
       : null,
