@@ -732,14 +732,21 @@ is needed. Reconnect in the app cannot help: it acts only on a `close` socket.
 The app detects it from the failures themselves. A send or a group lookup that
 Evolution answers with `Connection Closed` (or `not connected` / `connection
 lost`) records the time on the connection (`socket_dead_seen_at`, at most once a
-minute). A status read that finds the account `open` live and stored, with no
+minute). So do sends Evolution accepts but WhatsApp never acknowledges: on a
+wedged account a send still answers 200, but its stored row stays `PENDING`.
+Two minutes after each send the app reads that status back; two sends in a row
+still `PENDING` record the time of the later send. One stray `PENDING` changes
+nothing — they happen on healthy accounts too. This check needs
+`message_instance_ts_idx` (see "Indexes on Evolution's tables"). A status read
+that finds the account `open` live and stored, with no
 socket opened since — judged from the `"Instance"` row's `"updatedAt"`, which
 Evolution writes on every open — marks it **Stuck** on the dashboard, and
 `get-connection-status` returns `stalled: true`. With `NUXT_OPS_ALERT_EMAIL` set
 the operator is mailed straight away; after the usual ten-minute grace,
 everyone who can reach the connection is emailed that the service needs
 restarting (see [alerts.md](alerts.md)). The record clears when WhatsApp next
-answers a send or a group lookup (even with a refusal), when Evolution reopens
+acknowledges a send (its row moves past `PENDING`) or answers a group lookup
+(even with a refusal), when Evolution reopens
 the socket, or when the account is next read as not `open`.
 
 Limits: it needs the message database URL — without it a stuck session cannot

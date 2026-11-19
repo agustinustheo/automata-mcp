@@ -539,6 +539,57 @@ export async function readLastInbound(instance: AppInstance): Promise<LastInboun
   }
 }
 
+/** One message this app sent, as `/message/sendText` answered it. */
+export interface SentMessageRef {
+  /** `key.id` of the stored row. */
+  id: string
+  /** `key.remoteJid` of the stored row — the chat Evolution stored it under. */
+  remoteJid: string
+  /** `messageTimestamp` Evolution answered, unix seconds. */
+  timestamp: number
+}
+
+/**
+ * How far before the answered `messageTimestamp` the lookup still looks. The
+ * row carries the value Evolution answered with, so this only covers a clock
+ * read twice; it keeps the probe a short index range.
+ */
+const SENT_LOOKUP_SLACK_S = 5 * 60
+
+/**
+ * The stored `"Message".status` of a message this app sent — `PENDING` until
+ * WhatsApp's server ack is processed, then `SERVER_ACK`, `DELIVERY_ACK`, … — or
+ * `undefined` when no row matches (#239).
+ *
+ * Bounded like `readLastInbound`: needs `message_instance_ts_idx`, walks one
+ * account's rows from the send's timestamp on, and answers `undefined` without
+ * it rather than reading every row the account holds after every send.
+ * `remoteJid` and `fromMe` narrow the range further (and match the fork's
+ * unique index when the planner prefers it).
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function readSentMessageStatus(
+  instance: AppInstance,
+  sent: SentMessageRef,
+): Promise<string | undefined> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+  if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
+
+  const [row] = await query(sql => sql<Array<{ status: string | null }>>`
+    SELECT m.status
+    FROM "Message" m
+    WHERE m."instanceId" = ${instanceId}
+      AND m."messageTimestamp" >= ${sent.timestamp - SENT_LOOKUP_SLACK_S}
+      AND m.key->>'remoteJid' = ${sent.remoteJid}
+      AND m.key->>'id' = ${sent.id}
+      AND (m.key->>'fromMe')::boolean = true
+    LIMIT 1
+  `)
+  return row?.status ?? undefined
+}
+
 export interface MessageSearchOptions {
   /** Every term must appear in the message body. Already split, not yet escaped. */
   terms: string[]
