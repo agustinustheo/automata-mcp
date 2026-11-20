@@ -175,6 +175,48 @@ Each consumer keeps its own position in `cloud.cursors`, and nothing deletes row
 
 Events never contain credentials, connection strings, chat or table names, message content or tool arguments. Email addresses appear only on user events. A self-hosted deployment writes none.
 
+## Revenue data
+
+The cloud service keeps revenue numbers in Postgres, so they can be queried and joined with `app` without asking Stripe. Two tables in the `cloud` schema:
+
+**`cloud.stripe_subscriptions`**: one row per Stripe subscription, keyed on its Stripe id. Every time the service re-reads a customer's subscriptions (on each webhook and in the hourly reconcile) it upserts what it read, in the same transaction that writes the plan columns. That costs no extra Stripe calls, except one per discounted subscription whose coupon Stripe did not expand. The table is therefore never more than about an hour behind Stripe, even if a webhook is lost. The reconcile also runs a minute after each boot. Rows are never deleted: canceled subscriptions are what trial conversion and churn are counted from.
+
+| Column | Meaning |
+| --- | --- |
+| `id`, `customer_id`, `organization_id` | Stripe subscription and customer ids; the organization it was synced for (no foreign key: it outlives a deleted organization) |
+| `status`, `created`, `start_date`, `trial_start`, `trial_end`, `cancel_at`, `canceled_at`, `ended_at`, `current_period_end` | as Stripe reports them |
+| `currency`, `interval`, `interval_count` | billing period (all items of a subscription share it) |
+| `base_price_id`, `base_unit_amount`, `seat_price_id`, `seat_unit_amount`, `seat_quantity` | the base price and the seat item. The seat item is the one on `STRIPE_PRICE_SEAT`. |
+| `period_amount` | every item's unit amount × quantity for one period, before discounts, in cents |
+| `items` | every item as `{ price_id, product_id, unit_amount, quantity }` |
+| `coupon_id`, `percent_off`, `amount_off`, `discount_start`, `discount_end` | the subscription's discount, so 100%-off comp accounts can be told apart. Stripe allows several discounts on one subscription; only the first is stored, and the service logs a warning when there are more. Item-level discounts are not read. |
+| `updated_at` | last sync |
+
+It holds no email address or name. Join through `app.organizations.stripe_customer_id` (or `organization_id`), and on to `app.memberships` / `app.users` when you need people.
+
+**`cloud.revenue_daily`**: one row per day, Eastern time (`America/New_York`). The row for a day describes the end of that day (midnight Eastern). It is written once the first reconcile that finished after midnight has run, so usually within about an hour. It is computed from `cloud.stripe_subscriptions` alone. The run is claimed through `cloud.daily_jobs` (lease and finished day, like the CRM activity pass), so replicas compute it once.
+
+| Column | Meaning |
+| --- | --- |
+| `day` | the Eastern date |
+| `mrr_cents` | subscriptions that are paying (see below), with discounts applied, normalized to a month (yearly ÷ 12, weekly × 52/12). Trials are excluded. |
+| `paying` | paying subscriptions whose discounted amount is above zero, so comps are not counted |
+| `trialing` | subscriptions inside their trial |
+| `past_due` | subscriptions in `past_due`. `NULL` on backfilled rows. |
+| `canceled_today` | subscriptions that ended that day after having paid |
+| `trials_canceled_today` | subscriptions that ended that day without leaving their trial |
+| `trials_converted_today` | trials that ended that day with the subscription carrying on |
+| `backfilled` | reconstructed from dates rather than snapshotted (below) |
+| `computed_at` | when the row was written |
+
+"Paying" means: started, past any trial, not ended, and not `incomplete` / `incomplete_expired`. A subscription that is still running also has to be `active` or `past_due` (so `unpaid` and `paused` are excluded, like trials). Amounts are added up as they are, across currencies; everything is sold in USD.
+
+Stripe has no API for historical MRR, so this table is the history from the day it shipped. **Backfill:** on its first run, and for any day the service missed (it was down over midnight), the job reconstructs the missing days from each subscription's start, trial and end dates and marks them `backfilled`. Those days use each subscription's *current* price, seat count and discount, can't know which subscriptions were past due, and only cover subscriptions whose organization still existed when the service first synced it. Treat them as an estimate.
+
+**Checking against Stripe.** Compare the latest non-backfilled row with the Stripe dashboard's MRR and active subscribers. Stripe's own MRR may differ slightly: it counts some discounts and past-due subscriptions on its own rules, and it reports in real time where the row is the end of yesterday.
+
+The internal analytics connector reads both tables. It is not scoped to an allowlist (`allTables`), so nothing needs adding. If it is ever scoped, add `cloud.stripe_subscriptions` and `cloud.revenue_daily`.
+
 ## Product analytics (PostHog)
 
 The web UI loads PostHog's browser library when `NUXT_PUBLIC_POSTHOG_KEY` is set **and** the deployment is hosted (`NUXT_CLOUD_URL` set). A self-hosted deployment never loads it, even with a key. Events go through our reverse proxy at `https://r.getautomata.app` (in front of PostHog US, so ad blockers that list `*.posthog.com` don't drop them); `NUXT_PUBLIC_POSTHOG_HOST` overrides it, `NUXT_PUBLIC_POSTHOG_UI_HOST` (default `https://us.posthog.com`) is only for links PostHog builds. The MCP endpoint sends nothing to PostHog.
@@ -391,7 +433,7 @@ This is what lets a Railway PR environment start. Railway never copies sealed va
 - with the CRM sync on, `SELECT (id, email, name, created, marketing_consent_at)` on `app.users`;
 - `UPDATE` on `app.organizations`;
 - `INSERT` on `app.hosted_events` and `INSERT, UPDATE` on `app.entitlement_defaults`;
-- `CREATE` on the database, or an existing `cloud` schema it owns.
+- `CREATE` on the database, or an existing `cloud` schema it owns. Everything in `cloud`, including `cloud.stripe_subscriptions` and `cloud.revenue_daily`, is created by the service and owned by its role, so they need no further grant. A separate analytics role that should read them needs `USAGE` on `cloud` and `SELECT` on the two tables.
 
 It never needs `app.instances`, where connection credentials live.
 
