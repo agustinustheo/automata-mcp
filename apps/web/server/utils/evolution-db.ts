@@ -557,9 +557,32 @@ export interface SentMessageRef {
 const SENT_LOOKUP_SLACK_S = 5 * 60
 
 /**
- * The stored `"Message".status` of a message this app sent — `PENDING` until
+ * Receipt statuses in `"MessageUpdate"`, best first. The first one a sent
+ * message has is what `readSentMessageStatus` reports for a row whose own
+ * status still reads `PENDING`.
+ */
+const RECEIPT_RANK = ['PLAYED', 'READ', 'DELIVERY_ACK', 'SERVER_ACK'] as const
+
+const RECEIPT_DENIED_LOG_QUIET_MS = 5 * 60_000
+let receiptDeniedLoggedAt = 0
+
+/**
+ * The acknowledgement state of a message this app sent — `PENDING` until
  * WhatsApp's server ack is processed, then `SERVER_ACK`, `DELIVERY_ACK`, … — or
- * `undefined` when no row matches (#239).
+ * `undefined` when no row matches or the answer cannot be known (#239).
+ *
+ * **`"Message".status` alone is not the answer.** Evolution writes every
+ * receipt as a `"MessageUpdate"` row, but does not reliably move the message's
+ * own `status` with it: production, Nov 19, 9 of 16 sends whose `"Message"`
+ * row still read `PENDING` had `SERVER_ACK`/`DELIVERY_ACK`/`READ` updates —
+ * some read by the recipient — and each pair of them raised a false "stuck"
+ * alert on a healthy account. So a row that reads `PENDING` is looked up in
+ * `"MessageUpdate"` (indexed on `"messageId"`) and the best receipt there wins.
+ * Only a row pending in both places is reported `PENDING`.
+ *
+ * A role that cannot read `"MessageUpdate"` (42501, older grant recipe) makes
+ * a pending row **unknown**, never a miss: reporting the bare `"Message"`
+ * status there is the false alarm this fixes. Logged at most every 5 minutes.
  *
  * Bounded like `readLastInbound`: needs `message_instance_ts_idx`, walks one
  * account's rows from the send's timestamp on, and answers `undefined` without
@@ -567,7 +590,7 @@ const SENT_LOOKUP_SLACK_S = 5 * 60
  * `remoteJid` and `fromMe` narrow the range further (and match the fork's
  * unique index when the planner prefers it).
  *
- * Raw driver errors, for the same reason as `readInstanceRecord`.
+ * Raw driver errors otherwise, for the same reason as `readInstanceRecord`.
  */
 export async function readSentMessageStatus(
   instance: AppInstance,
@@ -577,8 +600,8 @@ export async function readSentMessageStatus(
   const instanceId = await resolveEvolutionInstanceId(instance)
   if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
 
-  const [row] = await query(sql => sql<Array<{ status: string | null }>>`
-    SELECT m.status
+  const [row] = await query(sql => sql<Array<{ id: string, status: string | null }>>`
+    SELECT m.id, m.status
     FROM "Message" m
     WHERE m."instanceId" = ${instanceId}
       AND m."messageTimestamp" >= ${sent.timestamp - SENT_LOOKUP_SLACK_S}
@@ -587,7 +610,30 @@ export async function readSentMessageStatus(
       AND (m.key->>'fromMe')::boolean = true
     LIMIT 1
   `)
-  return row?.status ?? undefined
+  if (!row) return undefined
+  if (row.status !== 'PENDING') return row.status ?? undefined
+
+  let receipts: Array<{ status: string | null }>
+  try {
+    receipts = await query(sql => sql<Array<{ status: string | null }>>`
+      SELECT DISTINCT u.status
+      FROM "MessageUpdate" u
+      WHERE u."messageId" = ${row.id}
+        AND u."instanceId" = ${instanceId}
+    `)
+  }
+  catch (error) {
+    if ((error as { code?: unknown } | undefined)?.code !== '42501') throw error
+    if (Date.now() - receiptDeniedLoggedAt > RECEIPT_DENIED_LOG_QUIET_MS) {
+      receiptDeniedLoggedAt = Date.now()
+      console.warn('[socket] the Evolution database role cannot read "MessageUpdate", so unacknowledged sends are not '
+        + 'counted as dead-socket evidence. Add the "MessageUpdate" grant in docs/whatsapp.md "Reading and searching messages".')
+    }
+    return undefined
+  }
+
+  const seen = new Set(receipts.map(r => r.status))
+  return RECEIPT_RANK.find(status => seen.has(status)) ?? 'PENDING'
 }
 
 export interface MessageSearchOptions {
