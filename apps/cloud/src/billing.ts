@@ -279,24 +279,29 @@ export class Billing {
    * A discount's coupon arrives as an id unless Stripe expanded it; it is then
    * fetched (once per coupon per call), since the percent or amount off is
    * what tells a 100%-off comp from a paying customer.
+   *
+   * Best effort: a failed lookup stores the discount without its coupon's
+   * terms, logged, and never fails the sync. These rows are reporting; the
+   * sync around them is what writes the organization's plan, and a restricted
+   * key without `coupon_read` once failed every discounted organization's
+   * sync — a customer paying with a promotion code would have stayed on Free.
    */
   async #subscriptionRows(subs: Stripe.Subscription[], orgId: string): Promise<SubscriptionRow[]> {
     const { stripe, settings } = this.#client()
-    const coupons = new Map<string, Stripe.Coupon>()
+    const coupons = new Map<string, Stripe.Coupon | undefined>()
     const couponOf = async (discount: Stripe.Discount): Promise<Stripe.Coupon | undefined> => {
       const coupon = discount.source?.coupon
       if (!coupon) return undefined
       if (typeof coupon !== 'string') return coupon
-      let found = coupons.get(coupon)
-      if (!found) {
-        try {
-          found = await stripe.coupons.retrieve(coupon)
-        }
-        catch (error) {
-          stripeFailed('retrieve coupon', error)
-        }
-        coupons.set(coupon, found)
+      if (coupons.has(coupon)) return coupons.get(coupon)
+      let found: Stripe.Coupon | undefined
+      try {
+        found = await stripe.coupons.retrieve(coupon)
       }
+      catch (error) {
+        console.warn(`[billing] could not read coupon ${coupon} for subscription reporting; stored without its terms: ${describeError(error)}`)
+      }
+      coupons.set(coupon, found)
       return found
     }
 
