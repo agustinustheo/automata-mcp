@@ -50,7 +50,7 @@ What it will and will not send:
   in `close` until somebody scans its QR code, and `ownerJid` is the only thing
   that tells that apart from a logout.
 - Nothing is mailed until a connection has been down for **10 minutes**, in any
-  state, `close` included (a connection that is only **stuck** waits an hour,
+  state, `close` included (a connection that is only **stuck** waits two hours,
   below). A drop that recovers inside that window mails nobody,
   so a short blip no longer produces an outage mail followed seconds later by a
   recovery mail. The sweep runs every five minutes, so a real outage is reported
@@ -78,7 +78,7 @@ What it will and will not send:
   `Connection Closed` and Evolution has not reopened the socket since. The
   connection is marked stuck from the next read. Being stuck is inferred, not
   read off Evolution, so the organization is mailed only after it has lasted
-  **an hour** (any other fault at the same time keeps the 10-minute grace);
+  **two hours** (any other fault at the same time keeps the 10-minute grace);
   the operator, below, hears at once. The mail says the Evolution service needs restarting, never
   Reconnect. A webhook delivery cannot start it. See
   [whatsapp.md](whatsapp.md) "Stuck with the socket dead".

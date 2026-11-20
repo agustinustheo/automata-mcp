@@ -753,7 +753,7 @@ that finds the account `open` live and stored, with no
 socket opened since — judged from the `"Instance"` row's `"updatedAt"`, which
 Evolution writes on every open — marks it **Stuck** on the dashboard, and
 `get-connection-status` returns `stalled: true`. With `NUXT_OPS_ALERT_EMAIL` set
-the operator is mailed straight away; after an hour (longer than the usual
+the operator is mailed straight away; after two hours (longer than the usual
 ten minutes, since a stuck socket is inferred rather than read), everyone who
 can reach the connection is emailed that the service needs
 restarting (see [alerts.md](alerts.md)). The record clears when WhatsApp next

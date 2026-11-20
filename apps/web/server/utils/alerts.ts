@@ -210,12 +210,12 @@ const GRACE_MS = 10 * 60 * 1000
  * state is read straight off Evolution. On Nov 19–20 it mailed four
  * organizations about healthy accounts (#289, #290). The operator is still
  * mailed at once (`reportLoopToOperator`), so a real stall gets looked at
- * within minutes; the organization hears only once it has held for an hour
- * — about when a restart would be due anyway. Any other fault alongside it
+ * within minutes; the organization hears only once it has held for two hours
+ * — two of the five false mails lasted about an hour (59 and 62 min). Any other fault alongside it
  * (`close`, a lost session, `flapping`, `unknown`) is fact, and keeps the
  * ordinary grace.
  */
-const STALLED_GRACE_MS = 60 * 60 * 1000
+const STALLED_GRACE_MS = 2 * 60 * 60 * 1000
 
 /** How long `health` must last before the organization is told. */
 export function graceFor(health: Pick<ConnectionHealth, 'state' | 'sessionLost' | 'flapping' | 'stalled'>): number {
