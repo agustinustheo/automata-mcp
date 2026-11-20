@@ -742,9 +742,12 @@ Two minutes after each send the app reads that status back — the `"Message"`
 row and, while that still says `PENDING`, the send's receipts in
 `"MessageUpdate"`, since Evolution often records an ack there without updating
 the row. A role without the `"MessageUpdate"` grant above gets no signal from
-sends at all, rather than false alarms. Two sends in a row still `PENDING`
-record the time of the later send. One stray `PENDING` changes
-nothing — they happen on healthy accounts too. This check needs
+sends at all, rather than false alarms. Two sends to people in a row still
+`PENDING` record the time of the later send. One stray `PENDING` changes
+nothing — they happen on healthy accounts too. A group send still `PENDING`
+counts for nothing either way: on healthy accounts about one group send in
+eight never gets a receipt recorded, while sends to people always do. A group
+send that is acknowledged still counts as proof the socket works. This check needs
 `message_instance_ts_idx` (see "Indexes on Evolution's tables"). A status read
 that finds the account `open` live and stored, with no
 socket opened since — judged from the `"Instance"` row's `"updatedAt"`, which
