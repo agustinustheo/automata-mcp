@@ -227,6 +227,8 @@ GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUr
 GRANT SELECT ("instanceId") ON "Chat", "Contact" TO wamcp_search;
 -- Group names, read from Evolution's own chat rows.
 GRANT SELECT ("remoteJid", "name") ON "Chat" TO wamcp_search;
+-- Send acknowledgements, for stuck-session detection.
+GRANT SELECT ("messageId", "instanceId", "status") ON "MessageUpdate" TO wamcp_search;
 ```
 
 The `"Instance"` grant is column by column on purpose: the same row holds
@@ -577,6 +579,8 @@ Worth knowing before you go looking for a bug:
     ON "Instance" TO evo_reader;
   GRANT SELECT ("instanceId") ON "Chat", "Contact" TO evo_reader;
   GRANT SELECT ("remoteJid", "name") ON "Chat" TO evo_reader;
+  -- Send acknowledgements, for stuck-session detection.
+  GRANT SELECT ("messageId", "instanceId", "status") ON "MessageUpdate" TO evo_reader;
   ```
 
   It is checked before it is stored — including that `"Message"` is actually
@@ -734,8 +738,12 @@ Evolution answers with `Connection Closed` (or `not connected` / `connection
 lost`) records the time on the connection (`socket_dead_seen_at`, at most once a
 minute). So do sends Evolution accepts but WhatsApp never acknowledges: on a
 wedged account a send still answers 200, but its stored row stays `PENDING`.
-Two minutes after each send the app reads that status back; two sends in a row
-still `PENDING` record the time of the later send. One stray `PENDING` changes
+Two minutes after each send the app reads that status back — the `"Message"`
+row and, while that still says `PENDING`, the send's receipts in
+`"MessageUpdate"`, since Evolution often records an ack there without updating
+the row. A role without the `"MessageUpdate"` grant above gets no signal from
+sends at all, rather than false alarms. Two sends in a row still `PENDING`
+record the time of the later send. One stray `PENDING` changes
 nothing — they happen on healthy accounts too. This check needs
 `message_instance_ts_idx` (see "Indexes on Evolution's tables"). A status read
 that finds the account `open` live and stored, with no
@@ -745,7 +753,7 @@ Evolution writes on every open — marks it **Stuck** on the dashboard, and
 the operator is mailed straight away; after the usual ten-minute grace,
 everyone who can reach the connection is emailed that the service needs
 restarting (see [alerts.md](alerts.md)). The record clears when WhatsApp next
-acknowledges a send (its row moves past `PENDING`) or answers a group lookup
+acknowledges a send (a receipt past `PENDING`) or answers a group lookup
 (even with a refusal), when Evolution reopens
 the socket, or when the account is next read as not `open`.
 

@@ -17,7 +17,10 @@ import { rememberBounded } from './lookup-cache'
  * `PENDING` hours later — and that 200 had *cleared* the evidence #205 relies on.
  *
  * So the send no longer clears anything. Instead, `ACK_CHECK_DELAY_MS` after a
- * send this reads the row's status once:
+ * send this reads the row's status once — `"Message".status`, and for a row
+ * still `PENDING` its receipts in `"MessageUpdate"`, since Evolution often
+ * records the ack there without moving the row (`readSentMessageStatus`; the
+ * row alone raised false alarms on healthy accounts, Nov 19):
  *
  *   - **Past `PENDING`** — proof the socket worked: the miss run ends and
  *     evidence from before the send is cleared (`noteSocketAcknowledged`).
