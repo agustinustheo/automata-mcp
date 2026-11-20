@@ -24,11 +24,19 @@ import { rememberBounded } from './lookup-cache'
  *
  *   - **Past `PENDING`** — proof the socket worked: the miss run ends and
  *     evidence from before the send is cleared (`noteSocketAcknowledged`).
- *   - **Still `PENDING`** — a miss. **Two in a row** with no ack between record
+ *   - **Still `PENDING`, sent to a person** (`isDirectChat`) — a miss. **Two
+ *     in a row** with no ack between record
  *     the socket dead (`noteSocketDead`, at the *later* send's time). Never one:
  *     a single stray `PENDING` happens on healthy accounts (1 of 2, 6 of 26 API
  *     sends in a day in production), while wedged ones had every send of the
  *     day pending.
+ *   - **Still `PENDING`, sent to a group** (or any chat that is not a person)
+ *     — unknown: neither a miss nor an ack, the run is left as it is. Group
+ *     sends often never get a receipt recorded anywhere on healthy accounts:
+ *     production, Nov 20, 12 h of API sends: 0 of 1109 to people without a
+ *     receipt, 54 of 414 to groups (13 accounts), and one account flagged dead
+ *     from three group sends while it was receiving normally. A group send
+ *     that *is* acked still proves the socket.
  *   - **No row, any other status, or the read failed** — nothing; not knowing
  *     is not a miss.
  *
@@ -111,7 +119,7 @@ async function checkSendAck(instance: AppInstance, sent: SentMessageRef, sentAt:
     return
   }
 
-  const verdict = judgeAck(status)
+  const verdict = judgeAck(status, sent.remoteJid)
   if (verdict === 'acked') {
     missRuns.delete(instance.id)
     noteSocketAcknowledged(instance.id, sentAt)
@@ -128,9 +136,18 @@ async function checkSendAck(instance: AppInstance, sent: SentMessageRef, sentAt:
   noteSocketDead(instance, `send left unacknowledged (${misses} in a row)`, sentAt)
 }
 
+/**
+ * Whether a receipt is always recorded for a send to this chat: a person,
+ * addressed by phone number or LID. A group send often never gets one
+ * (`isDirectChat` false), so only its ack counts.
+ */
+export function isDirectChat(remoteJid: string): boolean {
+  return remoteJid.endsWith('@s.whatsapp.net') || remoteJid.endsWith('@lid')
+}
+
 /** What one stored status says about the socket. Pure. */
-export function judgeAck(status: string | undefined): 'acked' | 'missed' | 'unknown' {
-  if (status === 'PENDING') return 'missed'
+export function judgeAck(status: string | undefined, remoteJid: string): 'acked' | 'missed' | 'unknown' {
   if (status && ACKED.has(status)) return 'acked'
+  if (status === 'PENDING') return isDirectChat(remoteJid) ? 'missed' : 'unknown'
   return 'unknown'
 }
