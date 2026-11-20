@@ -40,6 +40,17 @@ import { rememberBounded } from './lookup-cache'
  *   - **No row, any other status, or the read failed** — nothing; not knowing
  *     is not a miss.
  *
+ * **Received traffic outranks a missing receipt.** A message stored as
+ * received (`readLastInbound`, WhatsApp's own timestamp) came in over the
+ * socket, and a dead socket or a wedged event queue stores none. So a miss is
+ * read against it (`judgeMiss`): traffic since *this* send means the socket
+ * worked after it — the receipt is only late, the run ends and older evidence
+ * is cleared like an ack; traffic since the *previous* miss starts the run
+ * again at one. Production, Nov 20: a healthy account's receipts for one
+ * contact were written only when its next message arrived — 2.5 min and 13 min
+ * late — and two such sends two hours apart, with six messages received
+ * between them, recorded it dead. Read only on a miss, one index probe.
+ *
  * Rules easy to undo:
  *
  *   - **The evidence is dated by the send, not the check.** `socketStalled`
@@ -70,8 +81,15 @@ const ACKED = new Set(['SERVER_ACK', 'DELIVERY_ACK', 'READ', 'PLAYED'])
 const MAX_PENDING_CHECKS = 2_000
 let pendingChecks = 0
 
-/** Per connection: misses in a row since the last ack. */
-const missRuns = new Map<string, number>()
+/**
+ * Margin a received message's timestamp must clear to count as traffic after a
+ * moment: it is the sender's clock, at one-second resolution, against ours.
+ */
+const TRAFFIC_CLOCK_SKEW_MS = 60_000
+
+/** Per connection: misses in a row since the last ack or received traffic, and when the latest was sent. */
+interface MissRun { count: number, lastSentAt: number }
+const missRuns = new Map<string, MissRun>()
 const MAX_MISS_RUNS = 10_000
 
 /**
@@ -127,13 +145,58 @@ async function checkSendAck(instance: AppInstance, sent: SentMessageRef, sentAt:
   }
   if (verdict !== 'missed') return
 
-  const misses = (missRuns.get(instance.id) ?? 0) + 1
-  rememberBounded(missRuns, instance.id, misses, MAX_MISS_RUNS)
+  const previous = missRuns.get(instance.id)
+  const traffic = judgeMiss(await lastTrafficAt(instance), sentAt.getTime(), previous?.lastSentAt)
+  if (traffic === 'since-send') {
+    console.info(`[socket] connection ${instance.id}: a send is still PENDING ${ACK_CHECK_DELAY_MS / 1000} s on, `
+      + 'but messages arrived since; not counted')
+    missRuns.delete(instance.id)
+    noteSocketAcknowledged(instance.id, sentAt)
+    return
+  }
+  const misses = traffic === 'since-previous' ? 1 : (previous?.count ?? 0) + 1
+  rememberBounded(missRuns, instance.id, { count: misses, lastSentAt: sentAt.getTime() }, MAX_MISS_RUNS)
   if (misses < MISSES_TO_RECORD) {
     console.info(`[socket] connection ${instance.id}: a send is still PENDING ${ACK_CHECK_DELAY_MS / 1000} s on (${misses} in a row)`)
     return
   }
   noteSocketDead(instance, `send left unacknowledged (${misses} in a row)`, sentAt)
+}
+
+/**
+ * When this account last stored a received message, ms — `undefined` when
+ * unknown (no index, no grant, read failed). Unknown leaves the miss as it is.
+ */
+async function lastTrafficAt(instance: AppInstance): Promise<number | undefined> {
+  try {
+    const inbound = await readLastInbound(instance)
+    const at = inbound?.at ? Date.parse(inbound.at) : Number.NaN
+    return Number.isNaN(at) ? undefined : at
+  }
+  catch (error) {
+    console.warn(`[socket] connection ${instance.id}: could not read the last received message:`, (error as Error)?.message ?? error)
+    return undefined
+  }
+}
+
+/**
+ * What received traffic says about a miss. Pure.
+ *
+ *   - `since-send` — a message arrived after this send: the socket worked,
+ *     the receipt is late. Not a miss.
+ *   - `since-previous` — a message arrived after the previous miss's send:
+ *     the run starts again at this miss.
+ *   - `none` — nothing newer, or not known: the miss counts as it stands.
+ */
+export function judgeMiss(
+  trafficAt: number | undefined,
+  sentAt: number,
+  previousSentAt: number | undefined,
+): 'since-send' | 'since-previous' | 'none' {
+  if (trafficAt === undefined) return 'none'
+  if (trafficAt > sentAt + TRAFFIC_CLOCK_SKEW_MS) return 'since-send'
+  if (previousSentAt !== undefined && trafficAt > previousSentAt + TRAFFIC_CLOCK_SKEW_MS) return 'since-previous'
+  return 'none'
 }
 
 /**

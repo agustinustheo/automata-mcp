@@ -744,7 +744,11 @@ row and, while that still says `PENDING`, the send's receipts in
 the row. A role without the `"MessageUpdate"` grant above gets no signal from
 sends at all, rather than false alarms. Two sends to people in a row still
 `PENDING` record the time of the later send. One stray `PENDING` changes
-nothing — they happen on healthy accounts too. A group send still `PENDING`
+nothing — they happen on healthy accounts too. Neither does a send still `PENDING`
+when a message has arrived since it, and a message arriving between two
+misses starts the count again: received messages come in over the same
+socket, so they prove it works — receipts for some contacts are only written
+when that contact's next message arrives, minutes late. A group send still `PENDING`
 counts for nothing either way: on healthy accounts about one group send in
 eight never gets a receipt recorded, while sends to people always do. A group
 send that is acknowledged still counts as proof the socket works. This check needs
@@ -758,7 +762,7 @@ ten minutes, since a stuck socket is inferred rather than read), everyone who
 can reach the connection is emailed that the service needs
 restarting (see [alerts.md](alerts.md)). The record clears when WhatsApp next
 acknowledges a send (a receipt past `PENDING`) or answers a group lookup
-(even with a refusal), when Evolution reopens
+(even with a refusal), when a message is received after it, when Evolution reopens
 the socket, or when the account is next read as not `open`.
 
 Limits: it needs the message database URL — without it a stuck session cannot
