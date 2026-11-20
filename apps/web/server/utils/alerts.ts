@@ -211,7 +211,8 @@ const GRACE_MS = 10 * 60 * 1000
  * organizations about healthy accounts (#289, #290). The operator is still
  * mailed at once (`reportLoopToOperator`), so a real stall gets looked at
  * within minutes; the organization hears only once it has held for two hours
- * — two of the five false mails lasted about an hour (59 and 62 min). Any other fault alongside it
+ * — two of the five false mails came from stalls of 59 and 62 minutes, so an
+ * hour would not have been enough. Any other fault alongside it
  * (`close`, a lost session, `flapping`, `unknown`) is fact, and keeps the
  * ordinary grace.
  */
