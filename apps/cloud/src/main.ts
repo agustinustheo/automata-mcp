@@ -95,18 +95,21 @@ else if (selfHost.status === 'confirming') {
 
 const timers: NodeJS.Timeout[] = []
 
-// Self-hoster update signups that did not reach Brevo when they arrived. Needs
-// only the cloud schema, so it does not wait for the web app.
-{
+/** Run `pass` every interval, skipping a tick while the previous pass is still going. */
+function everyTick(label: string, pass: () => Promise<unknown>, intervalMs = OUTBOX_INTERVAL_MS): void {
   let running = false
   timers.push(setInterval(() => {
     if (running) return
     running = true
-    selfHost.syncPending()
-      .catch(error => console.error(`[self-host] pass failed: ${describeError(error)}`))
+    pass()
+      .catch(error => console.error(`[${label}] pass failed: ${describeError(error)}`))
       .finally(() => { running = false })
-  }, SELF_HOST_SYNC_INTERVAL_MS))
+  }, intervalMs))
 }
+
+// Self-hoster update signups that did not reach Brevo when they arrived. Needs
+// only the cloud schema, so it does not wait for the web app.
+everyTick('self-host', () => selfHost.syncPending(), SELF_HOST_SYNC_INTERVAL_MS)
 
 /**
  * Once the web app's schema is there: publish Free's limits for new
@@ -125,18 +128,6 @@ async function startWork(): Promise<void> {
   })
   state.appReady = true
   console.info('[cloud] ready')
-
-  /** Run `pass` every interval, skipping a tick while the previous pass is still going. */
-  const everyTick = (label: string, pass: () => Promise<unknown>, intervalMs = OUTBOX_INTERVAL_MS) => {
-    let running = false
-    timers.push(setInterval(() => {
-      if (running) return
-      running = true
-      pass()
-        .catch(error => console.error(`[${label}] pass failed: ${describeError(error)}`))
-        .finally(() => { running = false })
-    }, intervalMs))
-  }
 
   everyTick('outbox', () => consumeBillingEvents(sql, billing))
   // A separate guard and cursor: a slow or paused Brevo never holds up seats
