@@ -8,6 +8,7 @@ import { createCloudServer } from './http.ts'
 import { describeError } from './http-error.ts'
 import { consumeBillingEvents, consumeCrmEvents } from './outbox.ts'
 import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } from './plans.ts'
+import { markReconciled, snapshotRevenue } from './revenue.ts'
 import { SelfHostUpdates } from './self-host-updates.ts'
 
 /**
@@ -21,9 +22,10 @@ import { SelfHostUpdates } from './self-host-updates.ts'
  */
 
 const OUTBOX_INTERVAL_MS = 15_000
-/** How often to ask whether today's activity-date pass is due; a run happens once per UTC day. */
+/** How often to ask whether a daily job (activity dates, revenue snapshot) is due; each runs once per day. */
 const DAILY_CHECK_INTERVAL_MS = 10 * 60_000
 const RECONCILE_INTERVAL_MS = 60 * 60 * 1000
+const RECONCILE_FIRST_DELAY_MS = 60_000
 const SELF_HOST_SYNC_INTERVAL_MS = 10 * 60_000
 
 // Defence in depth: every request path catches its own rejections; one that
@@ -156,8 +158,20 @@ async function startWork(): Promise<void> {
       }
     }
     if (synced || failed) console.info(`[reconcile] ${synced} organization(s) synced, ${failed} failed`)
+    // A finished pass, failures included (they are logged): the revenue
+    // snapshot waits for one that ended after the day it describes.
+    await markReconciled(sql)
   }
-  timers.push(setInterval(() => { reconcile().catch(error => console.error(`[reconcile] failed: ${describeError(error)}`)) }, RECONCILE_INTERVAL_MS))
+  const runReconcile = () => { reconcile().catch(error => console.error(`[reconcile] failed: ${describeError(error)}`)) }
+  timers.push(setInterval(runReconcile, RECONCILE_INTERVAL_MS))
+  // Once soon after boot too: an interval restarted by every deploy would
+  // otherwise never fire on a day with deploys less than an hour apart, and
+  // cloud.stripe_subscriptions promises to be within an hour of Stripe.
+  timers.push(setTimeout(runReconcile, RECONCILE_FIRST_DELAY_MS))
+
+  // Yesterday's revenue row (revenue.ts), from what the reconcile stored.
+  // Checked every ten minutes; claimed once per Eastern day across replicas.
+  if (billing.configured) everyTick('revenue', () => snapshotRevenue(sql), DAILY_CHECK_INTERVAL_MS)
 }
 
 startWork().catch((error) => {
