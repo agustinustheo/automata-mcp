@@ -202,6 +202,29 @@ function alertableKind(instance: AppInstance): 'whatsapp' | 'telegram' | undefin
 const GRACE_MS = 10 * 60 * 1000
 
 /**
+ * The grace for a connection whose only fault is `stalled`, before its
+ * organization is mailed.
+ *
+ * Longer, because `stalled` is an inference — sends WhatsApp did not
+ * acknowledge, or a `Connection Closed` from one call — while every other
+ * state is read straight off Evolution. On Nov 19–20 it mailed four
+ * organizations about healthy accounts (#289, #290). The operator is still
+ * mailed at once (`reportLoopToOperator`), so a real stall gets looked at
+ * within minutes; the organization hears only once it has held for two hours
+ * — two of the five false mails came from stalls of 59 and 62 minutes, so an
+ * hour would not have been enough. Any other fault alongside it
+ * (`close`, a lost session, `flapping`, `unknown`) is fact, and keeps the
+ * ordinary grace.
+ */
+const STALLED_GRACE_MS = 2 * 60 * 60 * 1000
+
+/** How long `health` must last before the organization is told. */
+export function graceFor(health: Pick<ConnectionHealth, 'state' | 'sessionLost' | 'flapping' | 'stalled'>): number {
+  const onlyStalled = health.stalled && health.state === 'open' && !health.sessionLost && !health.flapping
+  return onlyStalled ? STALLED_GRACE_MS : GRACE_MS
+}
+
+/**
  * Decide, for one connection, whether anything needs to be said.
  *
  * Idempotent, and safe to call as often as you like — the two date fields on the
@@ -292,7 +315,7 @@ async function evaluate(instance: AppInstance): Promise<void> {
   if (instance.alerted_at) return
 
   const downSince = instance.down_since ? Date.parse(instance.down_since) : Date.now()
-  if (Date.now() - downSince < GRACE_MS) return
+  if (Date.now() - downSince < graceFor(health)) return
 
   const sent = await notifyWatchers(instance, canManage => outageMail(instance, health, canManage))
   if (sent) await updateRow('instances', instance.id, { alerted_at: new Date() })
@@ -808,7 +831,7 @@ async function recipientsFor(instance: AppInstance): Promise<AlertRecipient[]> {
     .map(member => ({
       email: member.email,
       // Already filtered to those who reach it, so only the management half is asked.
-      canManage: managesInstance({ role: member.role, userId: member.userId }, instance, true),
+      canManage: managesInstance(member, instance, true),
     }))
 }
 

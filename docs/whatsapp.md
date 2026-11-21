@@ -2,7 +2,7 @@
 
 ## Which Evolution
 
-The deployment's own Evolution server runs **`evolution-api-reforged` 3.1.0**,
+The deployment's own Evolution server runs **`evolution-api-reforged` 3.2.0**,
 our fork of Evolution API
 ([repo](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged),
 formerly `ju-li/evolution-api-v2`). Every file that names it pins its digest:
@@ -55,6 +55,19 @@ What the fork changes, and why we run it:
   /instance/connectionState` also reports the queue's lag. Settings:
   `EVENT_QUEUE_PERSIST`, `EVENT_QUEUE_ITEM_TIMEOUT_MS`,
   `EVENT_QUEUE_MAX_ENTRY_BYTES`, `EVENT_QUEUE_MAX_LENGTH`; the defaults fit.
+- **Full history means the phone's whole history, not one year** (3.2.0,
+  [#64](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/64)).
+  - **Why it was one year:** Baileys never tells WhatsApp how much history it
+    wants, and the phone then sends one year.
+  - **What changed:** a connection created with **Import full history** now asks
+    for up to ten years (`fullSyncDaysLimit`). In testing, that brought in
+    everything the phone held. A stock 2.3.7 server still stops at one year.
+  - **It also pairs as a Windows Desktop device,** so it shows as Windows under
+    the phone's Linked Devices instead of "Evolution API".
+  - **Existing connections get the longer history only after a re-import:**
+    **Import full history** on the dashboard, then a QR scan.
+  - **Each history batch is logged at INFO:** `history batch: …` when it arrives
+    and `history batch stored: …` once it is written.
 
 ### Moving from stock Evolution 2.3.7
 
@@ -227,6 +240,8 @@ GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUr
 GRANT SELECT ("instanceId") ON "Chat", "Contact" TO wamcp_search;
 -- Group names, read from Evolution's own chat rows.
 GRANT SELECT ("remoteJid", "name") ON "Chat" TO wamcp_search;
+-- Send acknowledgements, for stuck-session detection.
+GRANT SELECT ("messageId", "instanceId", "status") ON "MessageUpdate" TO wamcp_search;
 ```
 
 The `"Instance"` grant is column by column on purpose: the same row holds
@@ -592,6 +607,8 @@ Worth knowing before you go looking for a bug:
     ON "Instance" TO evo_reader;
   GRANT SELECT ("instanceId") ON "Chat", "Contact" TO evo_reader;
   GRANT SELECT ("remoteJid", "name") ON "Chat" TO evo_reader;
+  -- Send acknowledgements, for stuck-session detection.
+  GRANT SELECT ("messageId", "instanceId", "status") ON "MessageUpdate" TO evo_reader;
   ```
 
   It is checked before it is stored — including that `"Message"` is actually
@@ -817,14 +834,33 @@ is needed. Reconnect in the app cannot help: it acts only on a `close` socket.
 The app detects it from the failures themselves. A send or a group lookup that
 Evolution answers with `Connection Closed` (or `not connected` / `connection
 lost`) records the time on the connection (`socket_dead_seen_at`, at most once a
-minute). A status read that finds the account `open` live and stored, with no
+minute). So do sends Evolution accepts but WhatsApp never acknowledges: on a
+wedged account a send still answers 200, but its stored row stays `PENDING`.
+Two minutes after each send the app reads that status back — the `"Message"`
+row and, while that still says `PENDING`, the send's receipts in
+`"MessageUpdate"`, since Evolution often records an ack there without updating
+the row. A role without the `"MessageUpdate"` grant above gets no signal from
+sends at all, rather than false alarms. Two sends to people in a row still
+`PENDING` record the time of the later send. One stray `PENDING` changes
+nothing — they happen on healthy accounts too. Neither does a send still `PENDING`
+when a message has arrived since it, and a message arriving between two
+misses starts the count again: received messages come in over the same
+socket, so they prove it works — receipts for some contacts are only written
+when that contact's next message arrives, minutes late. A group send still `PENDING`
+counts for nothing either way: on healthy accounts about one group send in
+eight never gets a receipt recorded, while sends to people always do. A group
+send that is acknowledged still counts as proof the socket works. This check needs
+`message_instance_ts_idx` (see "Indexes on Evolution's tables"). A status read
+that finds the account `open` live and stored, with no
 socket opened since — judged from the `"Instance"` row's `"updatedAt"`, which
 Evolution writes on every open — marks it **Stuck** on the dashboard, and
 `get-connection-status` returns `stalled: true`. With `NUXT_OPS_ALERT_EMAIL` set
-the operator is mailed straight away; after the usual ten-minute grace,
-everyone who can reach the connection is emailed that the service needs
+the operator is mailed straight away; after two hours (longer than the usual
+ten minutes, since a stuck socket is inferred rather than read), everyone who
+can reach the connection is emailed that the service needs
 restarting (see [alerts.md](alerts.md)). The record clears when WhatsApp next
-answers a send or a group lookup (even with a refusal), when Evolution reopens
+acknowledges a send (a receipt past `PENDING`) or answers a group lookup
+(even with a refusal), when a message is received after it, when Evolution reopens
 the socket, or when the account is next read as not `open`.
 
 Limits: it needs the message database URL — without it a stuck session cannot
@@ -901,14 +937,22 @@ re-import can write a second copy of a message Evolution already holds (see
 [Reading and searching messages](#reading-and-searching-messages)), but reads and
 searches collapse copies by `key.id`, so each message is still reported once.
 
-Watch it land with `pnpm services:logs` while scanning:
+Watch it land with `pnpm services:logs` while scanning. The fork (3.2.0) logs
+each batch at INFO, with its date range and what was stored:
 
 ```
-recv 412 chats, 1180 contacts, 39204 msgs (is latest: false, progress: 34%), type: 2
+history batch: type=2 msgs=4976 chats=434 contacts=450 progress=79 isLatest=false from=2024-09-20T14:36:26.000Z to=2025-12-30T03:40:50.000Z
+history batch stored: type=2 inserted=4381 failed=0 skippedKnown=0 skippedIncomplete=595 skippedOutOfRange=0
 ```
 
-`type: 2` is a full sync, `type: 3` is the recent-only one. Anything but `2` means
-`syncFullHistory` never reached the socket.
+Stock 2.3.7 logs only at VERBOSE: `recv 412 chats, 1180 contacts, 39204 msgs
+(is latest: false, progress: 34%), type: 2`.
+
+`type=2` is a full sync, `type=3` is the recent-only one. Anything but `2` means
+`syncFullHistory` never reached the socket. `skippedIncomplete` counts system
+events with no content, such as the encryption notice or "X created the group".
+Their dates can reach back years before the oldest real message, so a batch's
+`from` is not how far back the stored messages go.
 
 The connection's page shows it too, to whoever scanned: after the scan it reads
 **Importing your WhatsApp history** with message and chat counts climbing, and
@@ -920,8 +964,10 @@ Caveats worth knowing before you rely on it:
 
 - **Media is not downloaded.** History gives message records; the bytes still need
   `getBase64FromMediaMessage` per message.
-- **Depth is whatever the phone volunteers.** `syncFullHistory` asks for
-  everything; it is not a guarantee of everything.
+- **Depth is whatever the phone holds.** On the fork, the import reaches the
+  start of the phone's own history. A phone where WhatsApp was set up or
+  restored without older chats has nothing older to send. A stock 2.3.7 server
+  stops at one year even when the phone holds more.
 - **Groups come too.** `syncFullHistory` overrides Evolution's group filter, so
   group chats appear in `list-chats` and in the token scope picker.
 - **Reads get slower as it grows.** Evolution indexes its `Message` table on

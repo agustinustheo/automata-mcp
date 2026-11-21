@@ -278,6 +278,16 @@ export function isTelegramNotConfigured(error: unknown): boolean {
   return (error as { data?: { code?: unknown } } | undefined)?.data?.code === TELEGRAM_NOT_CONFIGURED
 }
 
+/**
+ * The bridge's generic 404 for a route it does not have: no `code`. Every 404
+ * a bridge route sends on purpose carries one, so this is a bridge older than
+ * the route the app called — never "the thing you asked for is missing".
+ */
+export function isBridgeRouteMissing(error: unknown): boolean {
+  return httpStatusOf(error) === 404
+    && (error as { data?: { code?: unknown } } | undefined)?.data?.code === undefined
+}
+
 /** Written for whoever can act on it, which is whoever runs the bridge. */
 export function telegramNotConfiguredMessage(action?: string): string {
   return `${action ? `Could not ${action}: ` : ''}Telegram is not set up on this deployment yet. `
