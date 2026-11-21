@@ -1023,6 +1023,11 @@ const STALL_CLOCK_SKEW_MS = 30_000
  *     session from a brief drop that already recovered, and mailing an
  *     organization about the second is the wrong trade — `flapping` makes the
  *     same one.
+ *   - A message received after the evidence (`lastInboundAt`, more than
+ *     `STALL_CLOCK_SKEW_MS` after it): spent. It came in over the socket, and
+ *     a dead socket or a wedged queue stores nothing — so traffic proves the
+ *     socket the evidence condemned is working (Nov 20: a late receipt kept a
+ *     receiving account Stuck for 16 minutes after its next message).
  *   - A message database whose write time this read could not get: the
  *     evidence alone, for `STALL_UNCHECKED_MS`, so one failed read neither
  *     ends an alerted episode (a false "connected again") nor keeps an old one
@@ -1032,7 +1037,7 @@ const STALL_CLOCK_SKEW_MS = 30_000
  */
 export function socketStalled(
   seenAt: string | undefined,
-  read: { live?: ConnectionState, columnOpen: boolean, canReadRow: boolean, rowWrittenAt?: string },
+  read: { live?: ConnectionState, columnOpen: boolean, canReadRow: boolean, rowWrittenAt?: string, lastInboundAt?: string },
   now = Date.now(),
 ): { stalled: boolean, spent: boolean } {
   const seen = seenAt ? Date.parse(seenAt) : Number.NaN
@@ -1042,6 +1047,8 @@ export function socketStalled(
     const knownDown = read.live === 'close' || read.live === 'connecting'
     return { stalled: false, spent: knownDown }
   }
+  const inboundAt = read.lastInboundAt ? Date.parse(read.lastInboundAt) : Number.NaN
+  if (inboundAt > seen + STALL_CLOCK_SKEW_MS) return { stalled: false, spent: true }
   if (!read.canReadRow) return { stalled: false, spent: false }
 
   const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
@@ -1161,7 +1168,9 @@ async function readStatus(
     viaSql ? sqlRowWrittenAt(instance) : undefined,
     viaSql ? sqlDisconnectionReason(instance) : undefined,
     viaSql && options.counts ? cachedSqlCounts(instance, Boolean(options.freshCounts)) : undefined,
-    viaSql && options.counts ? cachedLastInbound(instance) : undefined,
+    // Also whenever there is dead-socket evidence: traffic since spends it
+    // (`socketStalled`). Only then, so the sweep pays nothing on a healthy account.
+    viaSql && (options.counts || instance.socket_dead_seen_at) ? cachedLastInbound(instance) : undefined,
   ])
 
   let row: EvolutionInstanceRecord | undefined = record
@@ -1207,6 +1216,7 @@ async function readStatus(
     columnOpen: row.connectionStatus === 'open',
     canReadRow: viaSql,
     rowWrittenAt,
+    lastInboundAt: lastInbound?.at,
   })
   if (socket.spent && instance.socket_dead_seen_at) forgetSocketEvidence(instance.id, instance.socket_dead_seen_at)
   const stalled = socket.stalled && !flapping
@@ -1223,8 +1233,8 @@ async function readStatus(
     number: row.number ?? row.ownerJid?.split('@')[0],
     ownerJid: row.ownerJid ?? undefined,
     disconnectedAt: row.disconnectionAt ?? undefined,
-    ...(lastInbound?.at && { lastInboundAt: lastInbound.at }),
-    ...(lastInbound && !lastInbound.at && { noInboundSince: lastInbound.since }),
+    ...(options.counts && lastInbound?.at && { lastInboundAt: lastInbound.at }),
+    ...(options.counts && lastInbound && !lastInbound.at && { noInboundSince: lastInbound.since }),
     stats,
   }
 }
@@ -1601,7 +1611,7 @@ async function cachedLastInbound(instance: AppInstance): Promise<LastInbound | u
   if (!reading) {
     reading = readLastInbound(instance)
       .then((value) => {
-        lastInboundCache.set(instance.id, { at: Date.now(), value })
+        rememberBounded(lastInboundCache, instance.id, { at: Date.now(), value }, MAX_COUNTS_ENTRIES)
         return value
       })
       .finally(() => lastInboundInFlight.delete(instance.id))

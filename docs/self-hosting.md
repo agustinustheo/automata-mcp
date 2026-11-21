@@ -39,7 +39,7 @@ cut that short.
 | Web app | this release | `3000`, or `$PORT` — the only port to publish |
 | Postgres | 16 (Alpine's `postgresql16`) | loopback, port `5432` |
 | Redis | 8.2.9 | `127.0.0.1:6379` |
-| Evolution API | 3.1.0 ([evolution-api-reforged](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged)) | `18080` |
+| Evolution API | 3.2.0 ([evolution-api-reforged](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged)) | `18080` |
 | Telegram bridge | this release | `18095` |
 
 The image is built on Evolution's own image, so Evolution runs exactly as it
@@ -175,7 +175,7 @@ on.
 | `web` | `ghcr.io/ju-li/automata-mcp-web:1` | — | `WEB_PORT` → 3000 |
 | `postgres` | `postgres:16.15-alpine` | — | no |
 | `redis` | `redis:8.2.9-alpine` | `whatsapp` | no |
-| `evolution` | `ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0` (digest-pinned) | `whatsapp` | no |
+| `evolution` | `ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.2.0` (digest-pinned) | `whatsapp` | no |
 | `telegram-bridge` | `ghcr.io/ju-li/automata-mcp-telegram-bridge:1` | `telegram` | no |
 
 Only the web app is published. Everything else, including the webhooks
@@ -225,6 +225,18 @@ Plans and billing are off on a self-hosted deployment: there is no plan picker,
 no Billing page, and no limit on connections, tokens or members. They exist only
 for the hosted offering, behind `NUXT_CLOUD_URL` — see [billing.md](billing.md) —
 and you never need to set it.
+
+**First-run setup.** Whoever signs up and creates a new organization is walked
+through it once: pick a connector, name it and add its credentials, scan the QR
+code (WhatsApp and Telegram), create the first connector token. The last step
+on a self-hosted install offers update mail — breaking changes and security
+advisories only, no marketing. Nothing leaves your install unless the admin
+submits an address there; it is then posted with the install's version to
+`https://billing.getautomata.app/self-host/updates`. Set
+`NUXT_SELF_HOST_UPDATES_URL=off` to hide the offer. Invited members and
+accounts that existed before this release never see the setup, and it is offered
+only until a connector is picked: someone who leaves part-way comes back to the
+ordinary screens.
 
 **`ALLOW_PRIVATE_TARGETS=true` with `SIGNUP=open` is the risky
 combination**, with Compose and the single container alike. Any stranger who

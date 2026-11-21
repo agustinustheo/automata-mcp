@@ -8,6 +8,8 @@ import { createCloudServer } from './http.ts'
 import { describeError } from './http-error.ts'
 import { consumeBillingEvents, consumeCrmEvents } from './outbox.ts'
 import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } from './plans.ts'
+import { markReconciled, snapshotRevenue } from './revenue.ts'
+import { SelfHostUpdates } from './self-host-updates.ts'
 
 /**
  * The hosted offering's service: everything the hosted deployment does that a
@@ -20,9 +22,11 @@ import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } fr
  */
 
 const OUTBOX_INTERVAL_MS = 15_000
-/** How often to ask whether today's activity-date pass is due; a run happens once per UTC day. */
+/** How often to ask whether a daily job (activity dates, revenue snapshot) is due; each runs once per day. */
 const DAILY_CHECK_INTERVAL_MS = 10 * 60_000
 const RECONCILE_INTERVAL_MS = 60 * 60 * 1000
+const RECONCILE_FIRST_DELAY_MS = 60_000
+const SELF_HOST_SYNC_INTERVAL_MS = 10 * 60_000
 
 // Defence in depth: every request path catches its own rejections; one that
 // slips through is logged and the process keeps serving. Exiting would stop
@@ -58,7 +62,8 @@ const billing = new Billing(sql, config.stripe, config.appUrl)
 const crm = new Crm(sql, config.brevo)
 const state = { appReady: false, stopped: false }
 const regions = new ConsentRegions(config.ipLookupUrl)
-const server = createCloudServer(billing, crm, regions, config, state)
+const selfHost = new SelfHostUpdates(sql, crm, config.brevo?.selfHostList, config.brevo?.selfHostDoi)
+const server = createCloudServer(billing, crm, regions, selfHost, config, state)
 
 // :: accepts IPv6 and IPv4 (legacy Railway private networking is IPv6-only).
 // A host with IPv6 disabled refuses :: outright, so fall back to IPv4 there.
@@ -83,7 +88,30 @@ if (!crm.configured) {
   }
 }
 
+if (selfHost.status === 'stored-only') {
+  console.info('[cloud] BREVO_SELF_HOST_LIST is not set — self-hoster update signups are stored and added to the list once it is.')
+}
+else if (selfHost.status === 'confirming') {
+  console.info('[cloud] self-hoster update signups confirm by email (BREVO_SELF_HOST_DOI_TEMPLATE) before joining the list.')
+}
+
 const timers: NodeJS.Timeout[] = []
+
+/** Run `pass` every interval, skipping a tick while the previous pass is still going. */
+function everyTick(label: string, pass: () => Promise<unknown>, intervalMs = OUTBOX_INTERVAL_MS): void {
+  let running = false
+  timers.push(setInterval(() => {
+    if (running) return
+    running = true
+    pass()
+      .catch(error => console.error(`[${label}] pass failed: ${describeError(error)}`))
+      .finally(() => { running = false })
+  }, intervalMs))
+}
+
+// Self-hoster update signups that did not reach Brevo when they arrived. Needs
+// only the cloud schema, so it does not wait for the web app.
+everyTick('self-host', () => selfHost.syncPending(), SELF_HOST_SYNC_INTERVAL_MS)
 
 /**
  * Once the web app's schema is there: publish Free's limits for new
@@ -102,18 +130,6 @@ async function startWork(): Promise<void> {
   })
   state.appReady = true
   console.info('[cloud] ready')
-
-  /** Run `pass` every interval, skipping a tick while the previous pass is still going. */
-  const everyTick = (label: string, pass: () => Promise<unknown>, intervalMs = OUTBOX_INTERVAL_MS) => {
-    let running = false
-    timers.push(setInterval(() => {
-      if (running) return
-      running = true
-      pass()
-        .catch(error => console.error(`[${label}] pass failed: ${describeError(error)}`))
-        .finally(() => { running = false })
-    }, intervalMs))
-  }
 
   everyTick('outbox', () => consumeBillingEvents(sql, billing))
   // A separate guard and cursor: a slow or paused Brevo never holds up seats
@@ -142,8 +158,20 @@ async function startWork(): Promise<void> {
       }
     }
     if (synced || failed) console.info(`[reconcile] ${synced} organization(s) synced, ${failed} failed`)
+    // A finished pass, failures included (they are logged): the revenue
+    // snapshot waits for one that ended after the day it describes.
+    await markReconciled(sql)
   }
-  timers.push(setInterval(() => { reconcile().catch(error => console.error(`[reconcile] failed: ${describeError(error)}`)) }, RECONCILE_INTERVAL_MS))
+  const runReconcile = () => { reconcile().catch(error => console.error(`[reconcile] failed: ${describeError(error)}`)) }
+  timers.push(setInterval(runReconcile, RECONCILE_INTERVAL_MS))
+  // Once soon after boot too: an interval restarted by every deploy would
+  // otherwise never fire on a day with deploys less than an hour apart, and
+  // cloud.stripe_subscriptions promises to be within an hour of Stripe.
+  timers.push(setTimeout(runReconcile, RECONCILE_FIRST_DELAY_MS))
+
+  // Yesterday's revenue row (revenue.ts), from what the reconcile stored.
+  // Checked every ten minutes; claimed once per Eastern day across replicas.
+  if (billing.configured) everyTick('revenue', () => snapshotRevenue(sql), DAILY_CHECK_INTERVAL_MS)
 }
 
 startWork().catch((error) => {

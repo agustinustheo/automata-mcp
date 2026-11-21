@@ -512,8 +512,11 @@ export interface LastInbound {
  */
 export async function readLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
   const { query } = await evolutionDbFor(instance)
-  const instanceId = await resolveEvolutionInstanceId(instance)
-  if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
+  const [instanceId, indexed] = await Promise.all([
+    resolveEvolutionInstanceId(instance),
+    messageIndexPresent(instance, query, INSTANCE_TS_INDEX),
+  ])
+  if (!indexed) return undefined
 
   const now = Date.now()
   const since = Math.floor((now - LAST_INBOUND_WINDOW_MS) / 1000)
@@ -537,6 +540,103 @@ export async function readLastInbound(instance: AppInstance): Promise<LastInboun
     ...(Number.isFinite(ts) && ts > 0 && { at: new Date(ts * 1000).toISOString() }),
     since: new Date(since * 1000).toISOString(),
   }
+}
+
+/** One message this app sent, as `/message/sendText` answered it. */
+export interface SentMessageRef {
+  /** `key.id` of the stored row. */
+  id: string
+  /** `key.remoteJid` of the stored row — the chat Evolution stored it under. */
+  remoteJid: string
+  /** `messageTimestamp` Evolution answered, unix seconds. */
+  timestamp: number
+}
+
+/**
+ * How far before the answered `messageTimestamp` the lookup still looks. The
+ * row carries the value Evolution answered with, so this only covers a clock
+ * read twice; it keeps the probe a short index range.
+ */
+const SENT_LOOKUP_SLACK_S = 5 * 60
+
+/**
+ * Receipt statuses in `"MessageUpdate"`, best first. The first one a sent
+ * message has is what `readSentMessageStatus` reports for a row whose own
+ * status still reads `PENDING`.
+ */
+const RECEIPT_RANK = ['PLAYED', 'READ', 'DELIVERY_ACK', 'SERVER_ACK'] as const
+
+const RECEIPT_DENIED_LOG_QUIET_MS = 5 * 60_000
+let receiptDeniedLoggedAt = 0
+
+/**
+ * The acknowledgement state of a message this app sent — `PENDING` until
+ * WhatsApp's server ack is processed, then `SERVER_ACK`, `DELIVERY_ACK`, … — or
+ * `undefined` when no row matches or the answer cannot be known (#239).
+ *
+ * **`"Message".status` alone is not the answer.** Evolution writes every
+ * receipt as a `"MessageUpdate"` row, but does not reliably move the message's
+ * own `status` with it: production, Nov 19, 9 of 16 sends whose `"Message"`
+ * row still read `PENDING` had `SERVER_ACK`/`DELIVERY_ACK`/`READ` updates —
+ * some read by the recipient — and each pair of them raised a false "stuck"
+ * alert on a healthy account. So a row that reads `PENDING` is looked up in
+ * `"MessageUpdate"` (indexed on `"messageId"`) and the best receipt there wins.
+ * Only a row pending in both places is reported `PENDING`.
+ *
+ * A role that cannot read `"MessageUpdate"` (42501, older grant recipe) makes
+ * a pending row **unknown**, never a miss: reporting the bare `"Message"`
+ * status there is the false alarm this fixes. Logged at most every 5 minutes.
+ *
+ * Bounded like `readLastInbound`: needs `message_instance_ts_idx`, walks one
+ * account's rows from the send's timestamp on, and answers `undefined` without
+ * it rather than reading every row the account holds after every send.
+ * `remoteJid` and `fromMe` narrow the range further (and match the fork's
+ * unique index when the planner prefers it).
+ *
+ * Raw driver errors otherwise, for the same reason as `readInstanceRecord`.
+ */
+export async function readSentMessageStatus(
+  instance: AppInstance,
+  sent: SentMessageRef,
+): Promise<string | undefined> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+  if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
+
+  const [row] = await query(sql => sql<Array<{ id: string, status: string | null }>>`
+    SELECT m.id, m.status
+    FROM "Message" m
+    WHERE m."instanceId" = ${instanceId}
+      AND m."messageTimestamp" >= ${sent.timestamp - SENT_LOOKUP_SLACK_S}
+      AND m.key->>'remoteJid' = ${sent.remoteJid}
+      AND m.key->>'id' = ${sent.id}
+      AND (m.key->>'fromMe')::boolean = true
+    LIMIT 1
+  `)
+  if (!row) return undefined
+  if (row.status !== 'PENDING') return row.status ?? undefined
+
+  let receipts: Array<{ status: string | null }>
+  try {
+    receipts = await query(sql => sql<Array<{ status: string | null }>>`
+      SELECT DISTINCT u.status
+      FROM "MessageUpdate" u
+      WHERE u."messageId" = ${row.id}
+        AND u."instanceId" = ${instanceId}
+    `)
+  }
+  catch (error) {
+    if ((error as { code?: unknown } | undefined)?.code !== '42501') throw error
+    if (Date.now() - receiptDeniedLoggedAt > RECEIPT_DENIED_LOG_QUIET_MS) {
+      receiptDeniedLoggedAt = Date.now()
+      console.warn('[socket] the Evolution database role cannot read "MessageUpdate", so unacknowledged sends are not '
+        + 'counted as dead-socket evidence. Add the "MessageUpdate" grant in docs/whatsapp.md "Reading and searching messages".')
+    }
+    return undefined
+  }
+
+  const seen = new Set(receipts.map(r => r.status))
+  return RECEIPT_RANK.find(status => seen.has(status)) ?? 'PENDING'
 }
 
 export interface MessageSearchOptions {
@@ -578,7 +678,7 @@ export interface MessageSearchHit {
    * to pay for. `pushName` is never an answer on its own; see `authorName` in
    * `mentions.ts`.
    */
-  sender: { identity?: string, pushName?: string }
+  sender: MessageSender
   timestamp?: string
   type?: string
   text: string
@@ -1100,9 +1200,11 @@ interface MessageIndexSpec {
   label: string
   fallback: string
   missing: string
-  cache: ReturnType<typeof staleWhileFailing<boolean>>
-  reported: Set<string>
 }
+
+/** Keyed `<message pool>|<spec.shape>`: one entry per database per index. */
+const indexPresence = staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false })
+const indexMissingReported = new Set<string>()
 
 /**
  * Whether this message database has an index of `spec`'s shape: valid, ready,
@@ -1118,9 +1220,9 @@ async function messageIndexPresent(
   query: SharedPool['query'],
   spec: MessageIndexSpec,
 ): Promise<boolean> {
-  const key = messagePoolKey(instance)
+  const key = `${messagePoolKey(instance)}|${spec.shape}`
 
-  return await spec.cache(key, async () => {
+  return await indexPresence(key, async () => {
     let present: boolean
     try {
       const [row] = await query(sql => sql<Array<{ present: boolean }>>`
@@ -1141,11 +1243,11 @@ async function messageIndexPresent(
       return undefined
     }
 
-    if (!present && !spec.reported.has(key)) {
-      spec.reported.add(key)
+    if (!present && !indexMissingReported.has(key)) {
+      indexMissingReported.add(key)
       console.warn(`${spec.label} ${spec.missing}`)
     }
-    if (present) spec.reported.delete(key)
+    if (present) indexMissingReported.delete(key)
     return present
   })
 }
@@ -1159,8 +1261,6 @@ const CHAT_TS_INDEX: MessageIndexSpec = {
   missing: '"Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
     + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
     + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 const KEY_ID_INDEX: MessageIndexSpec = {
@@ -1196,8 +1296,6 @@ const INSTANCE_TS_INDEX: MessageIndexSpec = {
   missing: '"Message" has no index on ("instanceId", "messageTimestamp"), so the time an account '
     + 'last received a message is not shown. Create message_instance_ts_idx: see docs/whatsapp.md '
     + '"Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 /**
@@ -1297,8 +1395,6 @@ const LID_ALT_INDEX: MessageIndexSpec = {
   missing: '"Message" has no partial index WHERE key ? \'remoteJidAlt\', '
     + 'so reading LID links scans every message in an account\'s LID chats and large accounts time out. '
     + 'Create message_lid_alt_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 /**
@@ -1621,19 +1717,68 @@ function bestNamed(sql: Sql) {
 }
 
 /**
+ * Who sent a message, unresolved.
+ *
+ * `identity` is what the name directory is asked about (it is keyed on the local
+ * part, so either addressing form resolves). `id` is a stable handle for a group
+ * message's sender, for the caller to show when no name resolves: without it, a
+ * group page of unnamed senders reads as one anonymous voice (#263). It is the
+ * LID's local part where one is known, since history rows only ever give us the
+ * LID, and the same person must not read as two between old and new messages.
+ */
+export interface MessageSender {
+  identity?: string
+  id?: string
+  pushName?: string
+}
+
+/**
  * The sender's identity as stored, preferring the group participant.
  *
- * Baileys writes `participant` for a group message on both the live and the
- * history path, and `participantAlt` — the same person's other addressing form —
- * only on the live one. Either resolves, because the directory is keyed on the
- * local part. For a 1:1 chat there is no participant and the chat's own JID *is*
- * the sender, which is why `remoteJid` is the fallback rather than nothing.
+ * Baileys writes `participant` for a group message on the live path, and
+ * `participantAlt` — the same person's other addressing form — beside it. For a
+ * 1:1 chat there is no participant and the chat's own JID *is* the sender, which
+ * is why `remoteJid` is the fallback there.
+ *
+ * **Never for a group.** History-imported group rows often arrive with no
+ * `participant` at all (measured on prod: most accounts' imports, before and
+ * after the evolution-api-reforged switch). Falling back to `remoteJid` there
+ * named the *group* as the sender of every such message. What those rows do
+ * carry is a numeric `pushName`: the sender's LID local part (matched against
+ * live rows' participants in tens of thousands of rows, against a phone local
+ * part in a few dozen). So it is read as the sender's identity — never as a name
+ * — and the directory turns it into one where it can. `@lid` on the recovered
+ * identity is a lookup key, not a claim: the directory matches on digits alone.
  */
-export function senderOf(row: { key: MessageKey | null, pushName: string | null }): { identity?: string, pushName?: string } {
-  return {
-    identity: row.key?.participant ?? row.key?.participantAlt ?? row.key?.remoteJid,
-    pushName: row.pushName ?? undefined,
+export function senderOf(row: { key: MessageKey | null, pushName: string | null }): MessageSender {
+  const { participant, participantAlt, remoteJid } = row.key ?? {}
+  const pushName = row.pushName ?? undefined
+
+  const stated = participant || participantAlt
+  if (stated) {
+    const lid = [participant, participantAlt].find(jid => jid?.endsWith('@lid'))
+    return { identity: stated, id: localPart(lid ?? stated), pushName }
   }
+
+  if (remoteJid?.endsWith('@g.us')) {
+    const recovered = identityFromPushName(pushName)
+    return recovered
+      ? { identity: recovered, id: localPart(recovered) }
+      : { pushName }
+  }
+
+  return { identity: remoteJid, pushName }
+}
+
+/** A bare LID, or a LID JID, standing where a push name should be. */
+function identityFromPushName(pushName: string | undefined): string | undefined {
+  const digits = pushName?.trim().match(/^(\d{6,20})(?:@lid)?$/)?.[1]
+  return digits ? `${digits}@lid` : undefined
+}
+
+/** Local part without a device suffix (`123:4@lid` → `123`), so one person reads as one id. */
+function localPart(jid: string): string {
+  return jid.split('@')[0]?.split(':')[0] ?? ''
 }
 
 /**

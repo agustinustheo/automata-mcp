@@ -17,7 +17,15 @@ const props = withDefaults(defineProps<{
    * only — every control it hides is independently refused with a 403.
    */
   canManage?: boolean
-}>(), { canManage: false })
+  /**
+   * First-run setup (pages/welcome.vue): only the pairing and import screens,
+   * no header, dashboard, tokens or controls — setup shows those steps itself.
+   * Emits `paired` once the phone is linked.
+   */
+  setup?: boolean
+}>(), { canManage: false, setup: false })
+
+const emit = defineEmits<{ paired: [] }>()
 
 interface StatusResponse {
   instance: PublicInstanceRow
@@ -344,6 +352,12 @@ watch(mode, (next, previous) => {
 
 onMounted(() => applyMode(mode.value))
 
+// Setup moves on once the phone is linked; the history import carries on
+// server-side whether or not this screen stays open.
+watch(mode, (next) => {
+  if (next === 'importing' || next === 'connected') emit('paired')
+}, { immediate: true })
+
 function restartPairing() {
   pairingTimedOut.value = false
   pairingStartedAt.value = Date.now()
@@ -380,7 +394,16 @@ watch(now, () => {
  * Evolution status, which is a worse thing to show someone than the sentence
  * below.
  */
-function backToPairing(path: string, success: string, failure: string) {
+/**
+ * Which of the two is signing the device out right now. Evolution's logout
+ * takes a few seconds, and the dashboard behind the closed confirm dialog
+ * gave no sign anything was happening — so the page swaps to a card saying so
+ * until the request returns, then pairing takes over.
+ */
+const signingOut = ref<'logout' | 'resync' | null>(null)
+
+function backToPairing(path: 'logout' | 'resync', success: string, failure: string) {
+  signingOut.value = path
   return run(
     async () => {
       await $fetch(`/api/instances/${id.value}/${path}`, { method: 'POST' })
@@ -392,8 +415,18 @@ function backToPairing(path: string, success: string, failure: string) {
       await refresh()
     },
     { success, failure, preferServerMessage: false },
-  )
+  ).finally(() => {
+    signingOut.value = null
+  })
 }
+
+/**
+ * Said inside the empty QR frame. After a sign-out Evolution needs a while
+ * before it hands out a new code, and a grey square that long reads as stuck.
+ */
+const qrWaiting = computed(() => pairingRequested.value
+  ? 'Getting a new code from WhatsApp. After signing out this can take up to a minute.'
+  : 'Getting a code from WhatsApp…')
 
 const disconnect = () => backToPairing(
   'logout',
@@ -415,6 +448,7 @@ const importHistory = () => backToPairing(
 <template>
   <div class="space-y-8">
     <InstanceHeader
+      v-if="!setup"
       :id="id"
       :label="data?.instance.label"
       :can-manage="canManage"
@@ -444,7 +478,22 @@ const importHistory = () => backToPairing(
       stuck, and the dashboard that follows would show counts of zero while the
       history is still arriving.
     -->
-    <Card v-if="mode === 'importing' || (mode === 'pairing' && justPaired)">
+    <!-- ── signing out: Disconnect / Import full history in flight ─────── -->
+    <Card v-if="signingOut">
+      <CardContent role="status" class="flex flex-col items-center gap-3 py-12 text-center">
+        <Loader2Icon class="size-8 animate-spin text-muted-foreground" />
+        <p class="font-medium">
+          {{ signingOut === 'resync' ? 'Preparing the history import…' : 'Disconnecting…' }}
+        </p>
+        <p class="max-w-md text-sm text-muted-foreground">
+          {{ signingOut === 'resync'
+            ? 'Signing this device out of WhatsApp. A new QR code appears here as soon as it\'s ready — scan it with the same phone to import your history.'
+            : 'Signing this device out of WhatsApp. A new QR code appears here as soon as it\'s ready.' }}
+        </p>
+      </CardContent>
+    </Card>
+
+    <Card v-else-if="mode === 'importing' || (mode === 'pairing' && justPaired)">
       <CardContent class="flex flex-col items-center gap-3 py-12 text-center">
         <Loader2Icon class="size-8 animate-spin text-muted-foreground" />
         <p class="font-medium">
@@ -458,7 +507,7 @@ const importHistory = () => backToPairing(
           {{ importProgress }}
         </p>
         <Button
-          v-if="mode === 'importing'"
+          v-if="mode === 'importing' && !setup"
           variant="ghost"
           size="sm"
           class="mt-2"
@@ -480,7 +529,7 @@ const importHistory = () => backToPairing(
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-col items-center gap-4 pb-8">
-        <QrFrame :src="qr?.base64" alt="WhatsApp pairing QR code" :expired="pairingTimedOut" />
+        <QrFrame :src="qr?.base64" alt="WhatsApp pairing QR code" :expired="pairingTimedOut" :waiting="qrWaiting" />
 
         <p v-if="qr?.pairingCode" class="text-sm text-muted-foreground">
           Or enter code <code class="font-mono font-medium">{{ qr.pairingCode }}</code> on your phone.
@@ -541,6 +590,18 @@ const importHistory = () => backToPairing(
             Show a new code
           </Button>
         </div>
+      </CardContent>
+    </Card>
+
+    <!-- Setup: linked, and nothing else to show here. -->
+    <Card v-else-if="setup">
+      <CardContent class="py-10 text-center">
+        <p class="font-medium">
+          {{ mode === 'connected' ? 'WhatsApp connected' : display.label }}
+        </p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          {{ mode === 'connected' ? (data?.profileName || data?.number || 'Your phone is linked.') : display.hint }}
+        </p>
       </CardContent>
     </Card>
 
@@ -680,6 +741,7 @@ const importHistory = () => backToPairing(
       </p>
     </template>
 
+    <template v-if="!setup">
     <Separator />
 
     <DbUrlNotice v-if="needsDbUrl" :id="id" kind="whatsapp" @saved="refresh()" />
@@ -742,6 +804,7 @@ const importHistory = () => backToPairing(
           <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="whatsapp" />
         </div>
       </section>
+    </template>
     </template>
   </div>
 </template>

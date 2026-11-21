@@ -88,6 +88,28 @@ export function managesInstance(
 }
 
 /**
+ * `managesInstance` for a signed-in actor whose reach the caller already
+ * established (`requireReadableInstance`, or a listing that only returns
+ * reachable rows).
+ */
+export function actorManages(actor: Actor, instance: Pick<AppInstance, 'created_by'>): boolean {
+  return managesInstance({ role: actor.role, userId: actor.user.id }, instance, true)
+}
+
+/**
+ * Does this member of `orgId` reach the connection? `authorizesInstance` over
+ * a freshly read assignment — skipped for an admin, who holds none.
+ */
+export async function memberReaches(
+  member: { role: OrgRole, userId: string },
+  orgId: string,
+  instance: Pick<AppInstance, 'id' | 'org'>,
+): Promise<boolean> {
+  const assigned = member.role !== 'admin' && await hasAssignment(member.userId, instance.id)
+  return authorizesInstance({ role: member.role, orgId }, instance.org, assigned)
+}
+
+/**
  * The acting user's organization and role.
  *
  * Memoized on `event.context.orgMembership` — deliberately NOT resolved in
@@ -124,12 +146,12 @@ export async function requireMembership(event: H3Event): Promise<Actor> {
  * outage reads as "your account is gone".
  */
 export async function loadActor(user: AppUser): Promise<Actor | undefined> {
-  let row: { membership_id: string, role: OrgRole, org_id: string, org_name: string, org_created?: string, members_create_connections: boolean } | undefined
+  let row: { membership_id: string, role: OrgRole, org_id: string, org_name: string, org_created?: string, members_create_connections: boolean, onboarding_for?: string } | undefined
   try {
     const sql = await appDb()
     ;[row] = await sql`
       SELECT m.id AS membership_id, m.role, o.id AS org_id, o.name AS org_name, o.created AS org_created,
-             o.members_create_connections
+             o.members_create_connections, o.onboarding_for
       FROM app.memberships m JOIN app.organizations o ON o.id = m.org
       WHERE m.user_id = ${user.id}
     `
@@ -144,7 +166,7 @@ export async function loadActor(user: AppUser): Promise<Actor | undefined> {
 
   return {
     user,
-    org: { id: row.org_id, name: row.org_name, created: row.org_created, members_create_connections: row.members_create_connections },
+    org: { id: row.org_id, name: row.org_name, created: row.org_created, members_create_connections: row.members_create_connections, onboarding_for: row.onboarding_for },
     role: row.role,
     membershipId: row.membership_id,
   }
@@ -179,6 +201,10 @@ export async function requireOrgAdmin(event: H3Event): Promise<Actor> {
  * Its limits are written in the same insert (`newOrganizationLimits`): the
  * hosted deployment's defaults, none otherwise. An organization never exists
  * unlimited where plans exist, even for a moment.
+ *
+ * The user it is created for is walked through first-run setup
+ * (`onboarding_for`, server/utils/onboarding.ts) — this is the only path that
+ * makes a new organization, so only a first admin ever sees it.
  */
 export async function createOrganizationFor(tx: Db, user: AppUser, name?: string): Promise<{ org: AppOrganization, membership: AppMembership }> {
   const label = (name ?? '').trim()
@@ -187,7 +213,7 @@ export async function createOrganizationFor(tx: Db, user: AppUser, name?: string
     || 'Organization'
 
   const [org] = await tx<AppOrganization[]>`
-    INSERT INTO app.organizations ${tx({ name: label.slice(0, 100), ...await newOrganizationLimits(tx) })}
+    INSERT INTO app.organizations ${tx({ name: label.slice(0, 100), onboarding_for: user.id, ...await newOrganizationLimits(tx) })}
     RETURNING id, name, created
   `
   const [membership] = await tx<AppMembership[]>`
@@ -263,16 +289,18 @@ export async function unassignInstance(
 }
 
 /**
- * How many live tokens an unassignment would revoke, without doing it, so the
- * confirmation can say what it costs rather than asking "are you sure".
+ * Live tokens on a connection per holder: what an unassignment would revoke,
+ * without doing it, so the confirmation can say what it costs rather than
+ * asking "are you sure". One grouped read, not one per member.
  */
-export async function countTokensOn(userId: string, instanceId: string): Promise<number> {
+export async function countTokensByHolder(instanceId: string): Promise<Map<string, number>> {
   const sql = await appDb()
-  const [row] = await sql<{ count: number }[]>`
-    SELECT count(*)::int AS count FROM app.mcp_tokens
-    WHERE assigned_to = ${userId} AND instance = ${instanceId} AND NOT revoked
+  const rows = await sql<{ assigned_to: string, count: number }[]>`
+    SELECT assigned_to, count(*)::int AS count FROM app.mcp_tokens
+    WHERE instance = ${instanceId} AND NOT revoked
+    GROUP BY assigned_to
   `
-  return row?.count ?? 0
+  return new Map(rows.map(row => [row.assigned_to, row.count]))
 }
 
 export async function hasAssignment(userId: string, instanceId: string): Promise<boolean> {
@@ -376,7 +404,7 @@ export async function requireManagedInstance(
 ): Promise<{ instance: AppInstance, actor: Actor }> {
   const found = await requireReadableInstance(event, instanceId)
   // Readable already established reach; this is the management half only.
-  if (!managesInstance({ role: found.actor.role, userId: found.actor.user.id }, found.instance, true)) {
+  if (!actorManages(found.actor, found.instance)) {
     throw createError({
       statusCode: 403,
       statusMessage: 'Only an organization admin or the member who created this connection can manage it.',

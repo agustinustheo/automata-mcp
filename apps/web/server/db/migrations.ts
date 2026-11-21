@@ -941,4 +941,17 @@ export const APP_MIGRATIONS: AppMigration[] = [
         CHECK (imap_security IN ('', 'tls', 'starttls', 'none'));
     `,
   },
+  {
+    name: '0029_onboarding',
+    sql: /* sql */ `
+      -- The user the first-run setup (pages/welcome.vue) is for: the admin
+      -- whose signup created this organization. Set by createOrganizationFor,
+      -- cleared when they finish or skip it. Existing organizations stay NULL,
+      -- so nobody who already has an account is walked through it. On the
+      -- organization, not the user: accepting an invitation moves the user to
+      -- an organization that never named them, which ends it by itself.
+      ALTER TABLE app.organizations
+        ADD COLUMN onboarding_for text REFERENCES app.users(id) ON DELETE SET NULL;
+    `,
+  },
 ]
