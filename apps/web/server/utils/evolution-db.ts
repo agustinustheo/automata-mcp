@@ -1273,8 +1273,6 @@ const KEY_ID_INDEX: MessageIndexSpec = {
     + 'cheaply that a message id is unique to the token\'s chats and refuses on Evolution servers that '
     + 'reload media by id alone (evolution-api-reforged). Create message_instance_key_id_idx: see '
     + 'docs/whatsapp.md "Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 /**
